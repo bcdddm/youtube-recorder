@@ -142,8 +142,21 @@ def render_wiki_note(art: dict, *, video_id: str, video_title: str, channel: str
     img_by_chunk: dict[int, list[dict]] = {}
     for im in images or []:
         img_by_chunk.setdefault(im.get("chunk_id"), []).append(im)
+    # 逐节分配：每节先分 1 张，富余图片归属该块的最后一节
+    sec_ids_per_chunk: dict[int, list[int]] = {}
+    for idx, s in enumerate(art["sections"]):
+        ids0 = s.get("source_chunk_ids") or []
+        if ids0:
+            sec_ids_per_chunk.setdefault(ids0[0], []).append(idx)
+    assign: dict[int, list[dict]] = {i: [] for i in range(len(art["sections"]))}
+    for cid, imgs in img_by_chunk.items():
+        holders = sec_ids_per_chunk.get(cid, [])
+        if not holders:
+            continue
+        for j, im in enumerate(imgs):
+            assign[holders[j] if j < len(holders) else holders[-1]].append(im)
     used_imgs: set[str] = set()
-    for s in art["sections"]:
+    for _sec_idx, s in enumerate(art["sections"]):
         anchor = ""
         ids = s.get("source_chunk_ids") or []
         if ids and ids[0] in chunks:
@@ -152,8 +165,7 @@ def render_wiki_note(art: dict, *, video_id: str, video_title: str, channel: str
             anchor = (f"\n\n> 来源片段 {_fmt_t(t0)} · "
                       f"[跳到原视频]({video_url}{sep}t={t0//1000})")
         img_md = ""
-        for cid in ids:
-            for im in img_by_chunk.get(cid, []):
+        for im in assign.get(_sec_idx, []):
                 if im["filename"] in used_imgs:
                     continue
                 used_imgs.add(im["filename"])

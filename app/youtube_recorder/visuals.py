@@ -255,7 +255,7 @@ def pick_frames(video_id: str, candidates: list[Candidate], work: Path,
             continue
         best = max(frames, key=sharpness)
         h = ahash(best)
-        if any(hamming(h, k) <= 5 for k in kept_hashes):
+        if not strict_fill and any(hamming(h, k) <= 5 for k in kept_hashes):
             c.status, c.reason = "rejected", "duplicate_of_kept_frame"
             continue
         kept_hashes.append(h)
@@ -271,6 +271,34 @@ def pick_frames(video_id: str, candidates: list[Candidate], work: Path,
 def _hhmmss(ms: int) -> str:
     s = ms // 1000
     return f"{s//3600:02d}{s%3600//60:02d}{s%60:02d}"
+
+
+def fill_candidates(cands: list[Candidate], chunks,
+                    sections_per_chunk: dict) -> list[Candidate]:
+    """密度 5 保障：每个文章小节至少一个候选。某块候选数少于该块小节数时，
+    在块时间范围内均匀补造候选（程序生成，无需提示词命中）。"""
+    by_chunk: dict = {}
+    for c in cands:
+        by_chunk.setdefault(c.chunk_id, []).append(c)
+    out = list(cands)
+    n_extra = 0
+    for ch in chunks:
+        need = sections_per_chunk.get(ch.chunk_id, 0)
+        have = len(by_chunk.get(ch.chunk_id, []))
+        if have >= need or need == 0:
+            continue
+        span = max(1, ch.end_ms - ch.start_ms)
+        for i in range(need - have):
+            frac = (have + i + 1) / (need + 1)
+            t = ch.start_ms + int(span * frac)
+            out.append(Candidate(
+                candidate_id=f"F{n_extra:03d}", segment_id="fill",
+                chunk_id=ch.chunk_id, target_ms=t,
+                window_ms=(max(0, t - 4000), t + 6000),
+                cue="该段时段画面", confidence=0.5))
+            n_extra += 1
+    out.sort(key=lambda c: c.target_ms)
+    return out
 
 
 def save_plan(candidates: list[Candidate], work: Path) -> Path:

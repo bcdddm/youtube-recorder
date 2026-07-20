@@ -332,6 +332,15 @@ def process_visuals(con, cfg, log, stats: RunStats) -> None:
             if cands:
                 log.event("visuals_llm_recall", video_id=vid,
                           detail=f"{len(cands)} candidates")
+        if density >= 5:
+            spc: dict = {}
+            for sec in art.get("sections", []):
+                for cid in sec.get("source_chunk_ids") or []:
+                    spc[cid] = spc.get(cid, 0) + 1
+                    break  # 每节只计首个来源块
+            cands = vz.fill_candidates(cands, chunks, spc)
+            log.event("visuals_fill_density5", video_id=vid,
+                      detail=f"{len(cands)} candidates for {sum(spc.values())} sections")
         _set(con, vid, st.VISUAL_PLANNED)
         if not cands:
             vz.save_plan([], wd)
@@ -340,7 +349,8 @@ def process_visuals(con, cfg, log, stats: RunStats) -> None:
             log.event("visuals_none", video_id=vid)
             continue
         cands = vz.pick_frames(vid, cands, wd,
-                               strict_fill=cfg.get("visuals.strict_fill", False))
+                               strict_fill=(density >= 5
+                                            or cfg.get("visuals.strict_fill", False)))
         plan = vz.save_plan(cands, wd)
         dbm.add_artifact(con, vid, "visual_plan", str(plan))
         selected = [c for c in cands if c.status == "selected"]

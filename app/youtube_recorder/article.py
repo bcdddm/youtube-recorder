@@ -197,6 +197,47 @@ def _join_quotes(texts: list[str]) -> str:
     return "".join(out)
 
 
+PUNCT_SYSTEM = """你是标点编辑。为给定中文文本重新标点：句号、逗号、问号、
+感叹号、顿号、冒号、引号均可自由使用与调整，长句可在语义边界断句。
+铁律：不得增加、删除或改动任何非标点字符——一个字都不行。
+只输出重新标点后的文本，不要任何解释。"""
+
+
+def _strip_punct(t: str) -> str:
+    return _re.sub(r"[\W_]+", "", t or "")
+
+
+def _ai_punctuate(cfg, con, video_id: str, text: str) -> str:
+    """AI 重标点 + 程序硬校验：剥掉标点后必须与原文逐字一致，
+    否则整段拒收、回退机械标点结果。"""
+    if not text.strip() or len(text) > 4000:
+        return text
+    try:
+        out = providers.complete(cfg, con, video_id, PUNCT_SYSTEM,
+                                 text, max_tokens=len(text) + 500,
+                                 purpose="proofread").strip()
+    except Exception:
+        return text
+    if out and _strip_punct(out) == _strip_punct(text):
+        return out
+    return text  # 校验不过 → 机械结果保底
+
+
+def _punctuate_sections(cfg, con, video_id: str, sections: list) -> int:
+    """并行为各节正文做 AI 标点（bridge 是 AI 文本本就有标点，一并处理无害）。"""
+    from concurrent.futures import ThreadPoolExecutor
+    bodies = [sec.get("body", "") for sec in sections]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        new = list(ex.map(lambda b: _ai_punctuate(cfg, None, video_id, b),
+                          bodies))
+    changed = 0
+    for sec, nb in zip(sections, new):
+        if nb != sec.get("body", ""):
+            sec["body"] = nb
+            changed += 1
+    return changed
+
+
 def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
     """选句式生成：AI 只挑句+写过渡，原句程序拷贝（含确定性清洗）→ 保留率硬保证。"""
     seg_by_id = {s.segment_id: s for s in can.segments}
@@ -373,6 +414,9 @@ def generate(cfg, con, video_id: str, can: Canonical,
     else:
         notes = analyze_chunks(cfg, con, video_id, chunks)
         art = compose_article(cfg, con, video_id, video_title, channel, notes)
+    if pct >= 40 and cfg.get("article.punctuation", "ai") == "ai":
+        art["punctuated"] = _punctuate_sections(cfg, con, video_id,
+                                                art.get("sections", []))
     art["proofread_fixes"] = proofread_sections(cfg, con, video_id,
                                                 art.get("sections", []))
     art["_chunks"] = [c.__dict__ | {"text": None} for c in chunks]  # traceability

@@ -281,6 +281,8 @@ EN_MAP = [
     ("守候回收", "Collect wait"), ("文章模式", "Article mode"),
     ("原文附加", "Append original"), ("整理附加 Prompt", "Extra prompt"),
     ("自动截图", "Auto screenshots"), ("图片密度", "density"),
+    ("1=只截关键画面 … 5=最密：程序保证每个自然段至少一张配图（无命中画面时按该段时间点自动截取）。",
+     "1 = key visuals only … 5 = densest: at least one image per section is guaranteed (auto-captured at the section's timestamp when no cue matches)."),
     ("保存模式", "Storage mode"), ("保存根目录", "Root folder"),
     ("Reports 保存位置", "Reports folder"),
     ("保存全部设置", "Save all settings"), ("保存 key", "Save keys"),
@@ -348,7 +350,9 @@ EN_MAP = [
     ("拉取模型列表部分失败：", "Model list fetch partly failed: "),
     ("走 OpenAI 时使用", "Used when routed to OpenAI"),
     ("走 Anthropic 时使用", "Used when routed to Anthropic"),
-    ("模型列表", "Model list"),
+    ("模型列表", "Model list"), ("标点方式", "Punctuation"),
+    ("AI 重标点（剥标点逐字校验，内容零改动）", "AI re-punctuation (verified char-identical)"),
+    ("机械补标点（句界补逗号/句号）", "Mechanical (boundary commas/periods)"),
     ("的全部内容…", " — everything from that day…"),
     ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
 ]
@@ -1548,6 +1552,8 @@ def settings():
             cfg.data["article"]["mode"] = f.get("article_mode", "edited_article")
             cfg.data["article"]["custom_prompt"] = f.get("custom_prompt", "").strip()
             cfg.data["article"]["append_original"] = f.get("append_original") == "1"
+            if f.get("punctuation") in ("ai", "basic"):
+                cfg.data["article"]["punctuation"] = f["punctuation"]
             try:
                 vp = int(f.get("verbatim_pct", 70))
                 if vp in (0, 40, 50, 60, 70, 80, 90, 100):
@@ -1702,6 +1708,10 @@ def settings():
 <p class=dim>硬约束：正文中至少该比例的字符逐字来自原文（AI 只负责选句和过渡，
 被选句子由程序原样拷贝，不足自动补齐；实测值写入文章 frontmatter。
 70% 以下档位允许 AI 重排句子先后组合，70% 及以上严格保持原文语序）。</p></td></tr>
+<tr><td>标点方式</td><td><select name=punctuation>
+<option value=ai {dsel('ai', cfg.get('article.punctuation','ai'))}>AI 重标点（剥标点逐字校验，内容零改动）</option>
+<option value=basic {dsel('basic', cfg.get('article.punctuation','ai'))}>机械补标点（句界补逗号/句号）</option>
+</select></td></tr>
 <tr><td>原文附加</td><td><label><input type=checkbox name=append_original value=1
  {'checked' if cfg.get('article.append_original', True) else ''}>
  AI 改写在前，完整原文以可折叠块附在文末（Obsidian 中默认收起）</label></td></tr>
@@ -1714,7 +1724,8 @@ def settings():
  &nbsp;图片密度 <input type=range name=density min=1 max=5
  value={cfg.get('visuals.image_density',3)}
  oninput="this.nextElementSibling.textContent=this.value">
- <b>{cfg.get('visuals.image_density',3)}</b>/5</td></tr>
+ <b>{cfg.get('visuals.image_density',3)}</b>/5
+ <p class=dim>1=只截关键画面 … 5=最密：程序保证每个自然段至少一张配图（无命中画面时按该段时间点自动截取）。</p></td></tr>
 </table></div>
 
 <div class=card><h3>⑤ 阅读与保存 · 写入你的库</h3>

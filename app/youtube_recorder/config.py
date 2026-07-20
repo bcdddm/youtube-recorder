@@ -87,6 +87,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 原文保留档位：0=关闭(自由整理)；50/60/70/80/90/100=正文中至少
         # 该比例字符逐字来自原文（程序保证，AI 只选句和写过渡）
         "verbatim_pct": 70,
+        # 标点方式：ai=AI 重标点(剥标点逐字校验，内容不可变) | basic=机械补标点
+        "punctuation": "ai",
     },
     "visuals": {
         "enabled": True,
@@ -169,6 +171,9 @@ def validate(data: dict[str, Any]) -> list[str]:
     a = data.get("article", {})
     check("article.mode", a.get("mode") in VALID_ARTICLE_MODES,
           f"must be one of {VALID_ARTICLE_MODES}")
+    check("article.punctuation",
+          a.get("punctuation", "ai") in ("ai", "basic"),
+          "must be ai or basic")
     check("article.verbatim_pct",
           a.get("verbatim_pct", 70) in (0, 40, 50, 60, 70, 80, 90, 100),
           "must be one of 0/40/50/60/70/80/90/100")

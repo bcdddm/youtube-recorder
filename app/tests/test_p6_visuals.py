@@ -82,3 +82,45 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all P6 tests passed")
+
+
+def test_fill_candidates_density5():
+    from youtube_recorder.article import Chunk
+    chunks = [Chunk(0, 0, 60000, "s0", "s1", "x"),
+              Chunk(1, 60000, 120000, "s2", "s3", "y")]
+    # chunk0 有 3 个小节但只有 1 个候选；chunk1 有 1 个小节 0 个候选
+    c0 = vz.Candidate(candidate_id="c000", segment_id="s0", chunk_id=0,
+                      target_ms=5000, window_ms=(1000, 11000),
+                      cue="图表", confidence=0.9)
+    out = vz.fill_candidates([c0], chunks, {0: 3, 1: 1})
+    per = {}
+    for c in out:
+        per[c.chunk_id] = per.get(c.chunk_id, 0) + 1
+    assert per[0] == 3 and per[1] == 1        # 每节至少一个候选
+    fills = [c for c in out if c.segment_id == "fill"]
+    assert len(fills) == 3
+    for c in fills:
+        ch = chunks[c.chunk_id]
+        assert ch.start_ms < c.target_ms < ch.end_ms   # 落在块时间范围内
+    assert out == sorted(out, key=lambda c: c.target_ms)
+
+
+def test_vault_per_section_image_distribution():
+    from youtube_recorder import vault
+    art = {"title_zh": "T", "one_sentence": "s", "summary": "sum",
+           "aliases": [], "tags": [], "takeaways": ["a"],
+           "_chunks": [{"chunk_id": 0, "start_ms": 0, "end_ms": 60000}],
+           "sections": [
+               {"heading": "A", "body": "a", "source_chunk_ids": [0]},
+               {"heading": "B", "body": "b", "source_chunk_ids": [0]},
+               {"heading": "C", "body": "c", "source_chunk_ids": [0]}]}
+    imgs = [{"chunk_id": 0, "filename": f"f{i}.jpg", "time_ms": i * 10000,
+             "cue": "画面"} for i in range(4)]
+    md = vault.render_wiki_note(art, video_id="v1", video_title="t",
+                                channel="ch", published="2026-01-01",
+                                video_url="https://youtu.be/v1",
+                                raw_note_name="", images=imgs)
+    body = md.split("## 正文")[1].split("## 关键")[0]
+    secs = body.split("### ")[1:]
+    counts = [s.count("![[") for s in secs]
+    assert counts == [1, 1, 2]   # 每节一张，富余归最后一节

@@ -338,6 +338,10 @@ EN_MAP = [
     ("选择现有组…", "Pick a group…"), ("或新建", "or new"),
     ("加入组", "Add to group"), ("选择要移出的组…", "Group to remove…"),
     ("从组移出", "Remove from"),
+    ("OpenAI 模型", "OpenAI model"), ("Anthropic 模型", "Anthropic model"),
+    ("整理/召回/问答走 OpenAI 时使用", "Used when a stage routes to OpenAI"),
+    ("走 Anthropic 时使用；可直接填任意模型名", "Used when routed to Anthropic; any model id accepted"),
+    ("（可重排句序）", " (reorder allowed)"),
     ("的全部内容…", " — everything from that day…"),
     ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
 ]
@@ -1449,6 +1453,10 @@ def settings():
                 v = f.get(f"ai_{grp}")
                 if v in ("auto", "openai", "anthropic"):
                     cfg.data.setdefault("ai", {})[grp] = v
+            for prov in ("openai", "anthropic"):
+                mv = f.get(f"model_{prov}", "").strip()
+                if mv and len(mv) < 60:
+                    cfg.data.setdefault("article", {})[f"model_{prov}"] = mv
             try:
                 cfg_mod.save(cfg)
                 msg = '<span class=ok>AI 分工已保存</span>'
@@ -1481,7 +1489,7 @@ def settings():
             cfg.data["article"]["append_original"] = f.get("append_original") == "1"
             try:
                 vp = int(f.get("verbatim_pct", 70))
-                if vp in (0, 50, 60, 70, 80, 90, 100):
+                if vp in (0, 40, 50, 60, 70, 80, 90, 100):
                     cfg.data["article"]["verbatim_pct"] = vp
             except (TypeError, ValueError):
                 pass
@@ -1607,15 +1615,17 @@ def settings():
 <option value=faithful_cleanup {dsel('faithful_cleanup',am)}>忠实清稿（只去口头禅）</option></select></td></tr>
 <tr><td>原文保留比例</td><td><select name=verbatim_pct>
 <option value=0 {dsel(0, cfg.get('article.verbatim_pct',70))}>关闭（自由整理）</option>
-<option value=50 {dsel(50, cfg.get('article.verbatim_pct',70))}>50%</option>
-<option value=60 {dsel(60, cfg.get('article.verbatim_pct',70))}>60%</option>
+<option value=40 {dsel(40, cfg.get('article.verbatim_pct',70))}>40%（可重排句序）</option>
+<option value=50 {dsel(50, cfg.get('article.verbatim_pct',70))}>50%（可重排句序）</option>
+<option value=60 {dsel(60, cfg.get('article.verbatim_pct',70))}>60%（可重排句序）</option>
 <option value=70 {dsel(70, cfg.get('article.verbatim_pct',70))}>70%（推荐）</option>
 <option value=80 {dsel(80, cfg.get('article.verbatim_pct',70))}>80%</option>
 <option value=90 {dsel(90, cfg.get('article.verbatim_pct',70))}>90%</option>
 <option value=100 {dsel(100, cfg.get('article.verbatim_pct',70))}>100%（纯原文分节）</option>
 </select>
 <p class=dim>硬约束：正文中至少该比例的字符逐字来自原文（AI 只负责选句和过渡，
-被选句子由程序原样拷贝，不足自动补齐；实测值写入文章 frontmatter）。</p></td></tr>
+被选句子由程序原样拷贝，不足自动补齐；实测值写入文章 frontmatter。
+70% 以下档位允许 AI 重排句子先后组合，70% 及以上严格保持原文语序）。</p></td></tr>
 <tr><td>原文附加</td><td><label><input type=checkbox name=append_original value=1
  {'checked' if cfg.get('article.append_original', True) else ''}>
  AI 改写在前，完整原文以可折叠块附在文末（Obsidian 中默认收起）</label></td></tr>
@@ -1665,6 +1675,21 @@ def settings():
 <option value=auto {dsel('auto', cfg.get('ai.visuals','auto'))}>自动</option>
 <option value=openai {dsel('openai', cfg.get('ai.visuals','auto'))}>OpenAI</option>
 <option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<tr><td>OpenAI 模型</td><td>
+<input name=model_openai list=dl_oai style="width:60%"
+ value="{escape(cfg.get('article.model_openai','gpt-4o-mini'))}">
+<datalist id=dl_oai>
+<option value="gpt-4o-mini"><option value="gpt-4o">
+<option value="gpt-4.1-mini"><option value="gpt-4.1">
+<option value="o4-mini"></datalist>
+<span class=dim>整理/召回/问答走 OpenAI 时使用</span></td></tr>
+<tr><td>Anthropic 模型</td><td>
+<input name=model_anthropic list=dl_ant style="width:60%"
+ value="{escape(cfg.get('article.model_anthropic','claude-sonnet-5'))}">
+<datalist id=dl_ant>
+<option value="claude-sonnet-5"><option value="claude-haiku-4-5">
+<option value="claude-opus-4-8"></datalist>
+<span class=dim>走 Anthropic 时使用；可直接填任意模型名</span></td></tr>
 <tr><td>问 AI 用</td><td><select name=ai_qa>
 <option value=auto {dsel('auto', cfg.get('ai.qa','auto'))}>自动</option>
 <option value=openai {dsel('openai', cfg.get('ai.qa','auto'))}>OpenAI</option>

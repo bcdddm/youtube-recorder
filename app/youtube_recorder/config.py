@@ -170,8 +170,8 @@ def validate(data: dict[str, Any]) -> list[str]:
     check("article.mode", a.get("mode") in VALID_ARTICLE_MODES,
           f"must be one of {VALID_ARTICLE_MODES}")
     check("article.verbatim_pct",
-          a.get("verbatim_pct", 70) in (0, 50, 60, 70, 80, 90, 100),
-          "must be one of 0/50/60/70/80/90/100")
+          a.get("verbatim_pct", 70) in (0, 40, 50, 60, 70, 80, 90, 100),
+          "must be one of 0/40/50/60/70/80/90/100")
 
     v = data.get("visuals", {})
     check("visuals.image_density",

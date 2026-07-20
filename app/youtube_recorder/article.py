@@ -19,6 +19,7 @@ from .transcript import Canonical
 
 CHUNK_TARGET_MIN = 8
 CHUNK_MAX_CHARS = 9000
+MAX_SECTION_CHARS = 600   # 单节正文上限（约 2 分钟内读完）
 
 NOTES_SYSTEM = """你是一名严谨的笔记员。给你一段视频口述稿片段，输出忠实笔记。
 规则：只记录片段中明确说到的内容；数字、专名、结论必须原样保留；不补充外部知识；
@@ -31,6 +32,8 @@ COMPOSE_SYSTEM = """你是一名专业编辑，把口述视频的分块笔记整
 规则：
 - 只使用笔记中的信息，不新增任何事实、数字或结论；不确定处保留[待查]标记。
 - 重组结构、合并重复论点、补充过渡句（edited_article 模式）。
+- 分段规则：每个独立事件/话题单独成一节，不要把多个事件混在一节里；
+  每节正文不超过 600 字（保证 2 分钟内能读完一节）。
 - 每个章节必须在 source_chunk_ids 中列出其内容来源的笔记块编号。
 - 标题15字内，准确概括核心内容，不做标题党。
 输出 JSON：
@@ -140,11 +143,19 @@ def compose_article(cfg, con, video_id: str, video_title: str,
     return art
 
 
+REORDER_BELOW = 70  # 低于此档位允许 AI 重排保留句顺序
+
 SELECT_SYSTEM = """你是选句编辑。给你一段视频口述稿的带编号句子。
-任务：挑选要"逐字保留"的句子（目标约占本段字符的 {pct}%），优先保留：
-含具体数字/点位/结论的句子、论证链完整的连续句。选中的句子会被程序原样拷贝，
-你不改写它们。另外给本段起一个小标题，并写一句不超过 30 字的过渡（不复述内容）。
-输出 JSON：{{"heading": "小标题", "bridge": "过渡一句", "keep": ["s0001","s0002",...]}}
+{order_rule}
+两个任务：
+1. 按"事件/话题"把本段切成 1-4 个小节：每个独立事件单独一节，不混谈；
+   每节保留句总字数控制在 600 字以内。
+2. 每节挑选要"逐字保留"的句子（整体目标约占本段字符的 {pct}%），优先保留
+   含具体数字/点位/结论的句子、论证链完整的连续句。选中句由程序原样拷贝。
+   完全没有信息量的句子（寒暄、口播广告、与主题无关的闲聊、纯重复）不要选入 keep。
+每节给小标题和一句 ≤30 字过渡（不复述内容）。
+输出 JSON：{{"sections": [{{"heading": "小标题", "bridge": "过渡",
+"keep": ["s0001","s0002",...]}}, ...]}}
 只输出 JSON。"""
 
 META_SYSTEM = """根据文章的章节标题与摘句样本，生成元信息。不得编造材料外的事实。
@@ -202,22 +213,42 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
             if seg.segment_id == c.last_segment:
                 break
         lines = "\n".join(f"{sid}: {seg_by_id[sid].text}" for sid in seg_ids)
+        order_rule = ("句序规则：可以为叙事连贯对句子的前后顺序做重组——"
+                      "keep 数组的排列顺序就是输出顺序。"
+                      if pct < REORDER_BELOW else
+                      "句序规则：保持句子在原文中的出现顺序，不重排。")
         try:
             reply = providers.complete(
-                cfg, con, video_id, SELECT_SYSTEM.format(pct=pct),
-                lines[:14000], max_tokens=1500, purpose="chunk_notes")
+                cfg, con, video_id,
+                SELECT_SYSTEM.format(pct=pct, order_rule=order_rule),
+                lines[:14000], max_tokens=2000, purpose="chunk_notes")
             sel = providers.extract_json(reply)
         except Exception:
-            sel = {"heading": "", "bridge": "", "keep": seg_ids}
-        keep = [k for k in sel.get("keep", []) if k in seg_by_id and k in seg_ids]
-        if not keep:
-            keep = seg_ids[: max(1, len(seg_ids) // 2)]
-        sections.append({
-            "heading": (sel.get("heading") or f"片段 {c.chunk_id + 1}")[:30],
-            "bridge": ("" if pct >= 100 else (sel.get("bridge") or "")[:40]),
-            "keep": keep, "all_ids": seg_ids,
-            "source_chunk_ids": [c.chunk_id],
-        })
+            sel = {}
+        subs = sel.get("sections")
+        if not isinstance(subs, list) or not subs:
+            subs = [{"heading": sel.get("heading", ""),
+                     "bridge": sel.get("bridge", ""),
+                     "keep": sel.get("keep", seg_ids)}]
+        claimed = set()
+        for sub in subs[:4]:
+            keep = [k for k in sub.get("keep", [])
+                    if k in seg_by_id and k in seg_ids and k not in claimed]
+            if not keep:
+                continue
+            claimed.update(keep)
+            sections.append({
+                "heading": (sub.get("heading") or f"片段 {c.chunk_id + 1}")[:30],
+                "bridge": ("" if pct >= 100 else (sub.get("bridge") or "")[:40]),
+                "keep": keep, "all_ids": seg_ids,
+                "source_chunk_ids": [c.chunk_id],
+            })
+        if not any(sec["source_chunk_ids"] == [c.chunk_id] for sec in sections):
+            sections.append({
+                "heading": f"片段 {c.chunk_id + 1}",
+                "bridge": "", "keep": seg_ids[: max(1, len(seg_ids) // 2)],
+                "all_ids": seg_ids, "source_chunk_ids": [c.chunk_id],
+            })
 
     def measure():
         q = sum(len(cleaned[k]) for sec in sections for k in sec["keep"])
@@ -235,9 +266,11 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
             extra = [i for i in sec["all_ids"] if i not in sec["keep"]]
             if extra:
                 nxt = extra[0]
-                pos = sec["all_ids"].index(nxt)
-                sec["keep"] = sorted(set(sec["keep"]) | {nxt},
-                                     key=sec["all_ids"].index)
+                if pct < REORDER_BELOW:
+                    sec["keep"] = list(sec["keep"]) + [nxt]  # 保持 AI 排序，补句附尾
+                else:
+                    sec["keep"] = sorted(set(sec["keep"]) | {nxt},
+                                         key=sec["all_ids"].index)
                 added = True
                 ratio, _, _ = measure()
                 if ratio >= target:
@@ -251,19 +284,71 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
 
     out = []
     for sec in sections:
-        quote = _join_quotes([cleaned[k] for k in sec["keep"]])
-        body = (sec["bridge"] + "\n\n" + quote) if sec["bridge"] else quote
-        out.append({"heading": sec["heading"], "body": body,
-                    "source_chunk_ids": sec["source_chunk_ids"]})
+        parts, cur, cur_len = [], [], 0
+        for k in sec["keep"]:
+            t = cleaned[k]
+            if cur and cur_len + len(t) + 1 > MAX_SECTION_CHARS:
+                parts.append(cur)
+                cur, cur_len = [], 0
+            cur.append(k)
+            cur_len += len(t) + 1  # +1 计入拼接补的标点
+        if cur:
+            parts.append(cur)
+        for i, part in enumerate(parts):
+            quote = _join_quotes([cleaned[k] for k in part])
+            bridge = sec["bridge"] if i == 0 else ""
+            body = (bridge + "\n\n" + quote) if bridge else quote
+            heading = sec["heading"] + ("" if i == 0 else f"（续{i}）")
+            out.append({"heading": heading, "body": body,
+                        "source_chunk_ids": sec["source_chunk_ids"]})
     ratio, q, b = measure()
     return out, round(ratio, 3)
+
+
+PROOFREAD_SYSTEM = """你是校对员。检查给定正文中的错别字与语音转写造成的
+同音字误写（如"在/再""做/作"、公司名/术语误拼）。只报你有把握的错误。
+不改数字、不改风格、不做润色。输出 JSON 数组（最多 30 条）：
+[{"find": "原文中的错误片段(≤8字)", "replace": "改正后"}]
+没有错误就输出 []。只输出 JSON 数组。"""
+
+
+def proofread_sections(cfg, con, video_id: str, sections: list) -> int:
+    """成文后错别字校对：LLM 只报"查找→替换"对，程序做定点替换。
+    安全阀：find≤8 字、长度差≤2、必须命中原文——防止借校对之名重写。"""
+    body_all = "\n".join(sec.get("body", "") for sec in sections)[:30000]
+    if not body_all.strip():
+        return 0
+    try:
+        reply = providers.complete(cfg, con, video_id, PROOFREAD_SYSTEM,
+                                   body_all, max_tokens=1500,
+                                   purpose="proofread")
+        import re as _re2
+        m = _re2.search(r"\[.*\]", reply, _re2.S)
+        fixes = json.loads(m.group(0)) if m else []
+    except Exception:
+        return 0
+    applied = 0
+    for fx in fixes[:30]:
+        find = str(fx.get("find", ""))
+        rep = str(fx.get("replace", ""))
+        if (not find or find == rep or len(find) > 8
+                or abs(len(find) - len(rep)) > 2):
+            continue
+        hit = False
+        for sec in sections:
+            if find in sec.get("body", ""):
+                sec["body"] = sec["body"].replace(find, rep)
+                hit = True
+        if hit:
+            applied += 1
+    return applied
 
 
 def generate(cfg, con, video_id: str, can: Canonical,
              video_title: str, channel: str) -> dict:
     chunks = chunk_transcript(can)
     pct = int(cfg.get("article.verbatim_pct", 70) or 0)
-    if pct >= 50:
+    if pct >= 40:
         sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct)
         sample = "\n".join(
             f"## {s['heading']}\n{s['body'][:200]}" for s in sections)[:8000]
@@ -288,6 +373,8 @@ def generate(cfg, con, video_id: str, can: Canonical,
     else:
         notes = analyze_chunks(cfg, con, video_id, chunks)
         art = compose_article(cfg, con, video_id, video_title, channel, notes)
+    art["proofread_fixes"] = proofread_sections(cfg, con, video_id,
+                                                art.get("sections", []))
     art["_chunks"] = [c.__dict__ | {"text": None} for c in chunks]  # traceability
     art["_mode"] = cfg.get("article.mode", "edited_article")
     return art

@@ -354,14 +354,143 @@ EN_MAP = [
     ("AI 重标点（剥标点逐字校验，内容零改动）", "AI re-punctuation (verified char-identical)"),
     ("机械补标点（句界补逗号/句号）", "Mechanical (boundary commas/periods)"),
     ("的全部内容…", " — everything from that day…"),
-    ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
+    ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),    ('设置 · YouTube Recorder', 'Settings · YouTube Recorder'),
+    ('队列 · YouTube Recorder', 'Queue · YouTube Recorder'),
+    ('报告 · YouTube Recorder', 'Reports · YouTube Recorder'),
+    ('频道 · YouTube Recorder', 'Channels · YouTube Recorder'),
+    ("auto:'跟随系统', light:'日间', dark:'夜间'", "auto:'System', light:'Light', dark:'Dark'"),
+    ("'主题：' + LABEL[mode] + '（点击切换）'", "'Theme: ' + LABEL[mode] + ' (click to switch)'"),
+    ('当前版本 v', 'Current version v'),
+    ('发现新版本', 'New version found'),
+    ('正在后台更新并重启——约半分钟后重新打开窗口即为新版', 'Updating and restarting in the background — reopen the window in ~30 s for the new version'),
+    ('按排班表整点唤醒（睡眠错过的唤醒后合并补跑），逐个检查订阅频道的 RSS。发现新视频后：自动模式直接进入处理，确认模式先在 Queue 列出等你逐条确认——两种模式都能随时跳过单条。', "Wakes on the hourly schedule (missed runs merge after sleep) and checks each subscribed channel's RSS. When new videos appear: auto mode processes them immediately; confirm mode lists them in Queue for per-item approval — either way you can skip any single item."),
+    ('自动：发现后直接处理（Queue 中可随时跳过）', 'Auto: process right after discovery (skip anytime in Queue)'),
+    ('确认：发现后先列出，逐条确认/跳过', 'Confirm: list first, approve/skip one by one'),
+    ('仅发现新视频时弹', 'Only when new videos are found'),
+    ('每次运行都弹', 'Every run'),
+    ('从不弹窗', 'Never'),
+    ('倒计时', 'Countdown'),
+    ('（其余留到下一轮，防首跑洪水）', '(the rest wait for the next run — first-run flood control)'),
+    (' 条 ', ' videos '),
+    ('先探测：有现成字幕就直接抓取——零成本、几秒完成、跳过转录；无字幕才下载原生 m4a 音频。直播和过短的视频自动跳过。', 'Probe first: existing captions are grabbed directly — zero cost, seconds, no transcription; only caption-less videos download native m4a audio. Live streams and too-short videos are skipped automatically.'),
+    ('短于', 'Shorter than'),
+    ('秒的视频（Shorts）不处理', 's (Shorts) are not processed'),
+    ('主路径把音频投进 MacWhisper 监视文件夹并守候出稿（本地、免费）；或直接走 OpenAI API——超 24MB 自动压缩，仍超限则切段、段间 15 秒重叠、按时间码无缝合并。MacWhisper 超时会自动切 API 兜底，不会卡死。', 'The primary path drops audio into the MacWhisper watch folder and waits for the SRT (local, free); or go straight to the OpenAI API — files over 24 MB are compressed, then chunked with 15-second overlaps and merged seamlessly by timecode. A MacWhisper timeout falls back to the API automatically, so nothing gets stuck.'),
+    ('MacWhisper 监视文件夹（本地）', 'MacWhisper watch folder (local)'),
+    ('OpenAI Whisper API（云端）', 'OpenAI Whisper API (cloud)'),
+    ('whisper.cpp（本地）', 'whisper.cpp (local)'),
+    ('分钟无出稿 → 自动转 API 兜底', 'min without output → automatic API fallback'),
+    ('投稿后', 'After submitting,'),
+    ('分钟内每 20 秒检查一次，出稿立即进入下一环节', 'min of checking every 20 s; it moves on the moment the SRT appears'),
+    ('完整文稿分块做忠实笔记（并行调用），再全局组稿成文章——不编造事实、每段可溯源到时间码；随后按内容语义截取视频画面插入对应章节（叙述式视频由 AI 推断画面时刻）。', 'The full transcript is chunked into faithful notes (parallel calls), then composed into one article — no invented facts, every section traceable to timecodes; frames are then captured by content semantics and inserted into matching sections (for narration-style videos the AI infers the moments).'),
+    ('整理成文（重组结构）', 'Composed article (restructured)'),
+    ('忠实清稿（只去口头禅）', 'Faithful cleanup (fillers removed only)'),
+    ('AI 改写在前，完整原文以可折叠块附在文末（Obsidian 中默认收起）', 'AI rewrite first; the full transcript is appended as a collapsible block (folded by default in Obsidian)'),
+    ('例：多保留讲者的原话引用；结尾加一段『对我的投资组合的启示』；语气偏口语。', 'E.g.: keep more direct quotes; end with a section on portfolio implications; conversational tone.'),
+    ('会追加到 AI 整理的系统提示词末尾；忠实性规则（不编造事实）始终优先。', 'Appended to the composing system prompt; faithfulness rules (no invented facts) always take priority.'),
+    ('成品原子写入下方位置并读回校验；之后在 Reports 页阅读、按时间轴浏览、按标签筛选，也可以对任何一篇“问 AI”或让它重新总结。删除的文章进回收站，3 天内可恢复。', 'Output is written atomically to the location below and verified by read-back; then read it in Reports — timeline view, tag filters, per-article “Ask AI”, or re-summarize. Deleted articles go to Trash, restorable for 3 days.'),
+    ('Obsidian Vault（20-Raw/30-Wiki 分层治理）', 'Obsidian Vault (20-Raw/30-Wiki layered governance)'),
+    ('单独文件夹 · Raw+Wiki 分层', 'Standalone folder · Raw+Wiki split'),
+    ('单独文件夹 · 纯平铺（原文折叠随文章，无 Raw 副本）', 'Standalone folder · flat (transcript folded inside the article, no Raw copy)'),
+    ('Obsidian 库根目录，或任意目标文件夹', 'Obsidian vault root, or any target folder'),
+    ('相对根目录，如 30-Wiki', 'Relative to root, e.g. 30-Wiki'),
+    ('修改时把现有文章迁移过去', 'Migrate existing articles when changed'),
+    ('本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。任配一个即可运转，两个都配则互为备援。下面可以给每个 AI 环节分别指定用哪家：', 'No API key ships with this app — you add your own, stored directly in the macOS Keychain, never in config files. Either provider alone works; with both configured they back each other up. Assign a provider per AI stage below:'),
+    ('整理成文用', 'Composing'),
+    ('截图召回用', 'Shot recall'),
+    ('问 AI 用', 'Ask-AI'),
+    ('自动（用已配置的，优先 OpenAI）', 'Auto (use whichever is configured; OpenAI first)'),
+    ('>自动</option>', '>Auto</option>'),
+    ('保存分工', 'Save routing'),
+    ('密钥状态', 'Key status'),
+    ('OpenAI key（留空=不变）', 'OpenAI key (blank = unchanged)'),
+    ('Anthropic key（留空=不变）', 'Anthropic key (blank = unchanged)'),
+    ('刷新模型列表', 'Refresh model list'),
+    ('拉取模型列表部分失败', 'Model list refresh partially failed'),
+    ('个）', ' total)'),
+    ('设置已保存', 'Settings saved'),
+    ('分工已保存', 'Routing saved'),
+    ('已存入钥匙串', 'Saved to Keychain'),
+    ('已迁移', 'Migrated'),
+    ('迁移失败', 'Migration failed'),
+    ('欢迎使用！请先在下方', 'Welcome! Please add your own AI key (OpenAI or Anthropic) under'),
+    ('中添加你自己的 AI 密钥（OpenAI 或 Anthropic 任一），添加后全部功能可用。', 'below — everything unlocks once one is added.'),
+    ('添加</button>', 'Add</button>'),
+    ('只处理此日期之后发布的视频（留空=从现在起）', 'Only process videos published after this date (blank = from now)'),
+    ('日期留空 = 从添加时刻起只收新视频，不回填历史。', 'Blank date = only new videos from the moment added; no backfill.'),
+    ('批量删除所选频道？已生成的文章会保留（归入手动添加）。', 'Delete the selected channels? Generated articles are kept (moved to Manually added).'),
+    ('删除该频道？已生成的文章会保留', 'Delete this channel? Generated articles are kept'),
+    ('已删除频道（历史文章保留）', 'Deleted channels (articles kept)'),
+    ('请输入 youtube.com 频道链接', 'Enter a youtube.com channel link'),
+    ('你手动添加过这些频道的视频——要不要直接订阅？', "You've manually added videos from these channels — subscribe?"),
+    ('手动处理过', 'manually processed'),
+    ('条视频', ' video(s)'),
+    ('新组', 'new group'),
+    ('名称', 'Name'),
+    ('暂无', 'None yet'),
+    ('请选择现有组或输入新组名', 'Pick an existing group or type a new name'),
+    ('移出该组', 'Remove from this group'),
+    ('已把该频道移出组「', 'Removed this channel from group “'),
+    ('个频道加入组「', ' channel(s) added to group “'),
+    ('个频道移出', ' channel(s) removed'),
+    ('已添加', 'Added'),
+    ('手动添加视为已确认，两种模式都直接处理', 'Manual adds count as approved — processed directly in both modes'),
+    ('无法从链接中识别视频 ID，请粘贴完整的 YouTube 视频链接', "Couldn't find a video ID in that link — paste a full YouTube video URL"),
+    ('订阅后从现在起自动收新视频）', 'subscribing auto-collects new videos from now on)'),
+    ('新发现 · 待确认（先确认才会处理）', 'Newly found · awaiting approval (processed only after you approve)'),
+    ('全部处理', 'Approve all'),
+    ('▶ 处理', '▶ Process'),
+    ('数据未变，跳过重渲染', 'unchanged, skip re-render'),
+    ('已等待 ${mins} 分钟（出稿后自动继续）', 'Waiting ${mins} min (auto-continues when the SRT arrives)'),
+    ('已触发运行，下方列表会自动更新', 'Run started — the list below updates automatically'),
+    ('已有一轮正在运行（含守候转录），', 'A run is already in progress (incl. transcript wait), '),
+    ('无需重复触发——下方列表实时更新', 'no need to trigger again — the list updates live'),
+    ('删除于', 'Deleted'),
+    ('剩余', 'Left'),
+    (' 天</td>', ' d</td>'),
+    ("'小时'+m+'分' : m+'分钟'", "'h '+m+'m' : m+' min'"),
+    ('删除这篇文章？将移入回收站，保留 3 天可恢复。', 'Delete this article? It moves to Trash, restorable for 3 days.'),
+    ('移入回收站', 'Move to Trash'),
+    ('视频发布', 'Published'),
+    ('未知', 'Unknown'),
+    ('时间轴从左到右：旧 → 新', 'timeline left to right: old → new'),
+    ('总结当天全部内容', 'Summarize everything from this day'),
+    ('← 横向滚动浏览 · 自动按视频发布日期排列 →', '← Scroll horizontally · ordered by publish date →'),
+    ('先勾选要删除的文章', 'Tick the articles to delete first'),
+    ('删除所选 ${ids.length} 篇？将移入回收站，3 天内可恢复。', 'Delete ${ids.length} selected? They move to Trash, restorable for 3 days.'),
+    ('共 ${rows.length} 篇', '${rows.length} articles total'),
+    ('${rows.length} 篇', '${rows.length} articles'),
+    ('· 组:${scope}', '· group: ${scope}'),
+    ('· ${groups[k].length} 篇', '· ${groups[k].length} articles'),
+    ('<th>生成</th>', '<th>Generated</th>'),
+    ('标签栏', 'tag bar'),
+    ('组胶囊（置顶排，多选）', 'group pills (pinned row, multi-select)'),
+    ('正在总结 ', 'Summarizing '),
+    ('重新生成', 'Regenerate'),
+    ('当日情报汇总（', 'Daily intel digest ('),
+    ('返回时间轴', 'Back to timeline'),
+    ('重新加载未显示的图片', 'Reload missing images'),
+    ('张图片未能加载，可点', ' image(s) failed to load — click'),
+    ('思考中…', 'Thinking…'),
+    ('回答', 'Answer'),
+    ('依据', 'Evidence'),
+    ('用当前设置重新生成这篇文章？（原文文稿不变，AI 重新总结并覆盖本篇）', 'Regenerate this article with the current settings? (Transcript unchanged; the AI re-summarizes and overwrites this article)'),
+    ('生成失败', 'Generation failed'),
+    ('重新总结', 'Re-summarize'),
+    ('返回', 'Back'),
+    ('硬约束：正文中至少该比例的字符逐字来自原文（AI 只负责选句和过渡，\n被选句子由程序原样拷贝，不足自动补齐；实测值写入文章 frontmatter。\n70% 以下档位允许 AI 重排句子先后组合，70% 及以上严格保持原文语序）。', 'Hard guarantee: at least this share of body characters is copied verbatim from the transcript (the AI only picks sentences and writes bridges; picked sentences are copied by the program and topped up automatically; the measured ratio goes into the article frontmatter. Tiers below 70% let the AI reorder sentences; 70% and above keep the original order).'),
+
+    ('新组名', 'new group name'),
+    ('也可以对任何一篇"问 AI"或让它重新总结。删除的文章进回收站，3 天内可恢复。', 'per-article "Ask AI", or re-summarize. Deleted articles go to Trash, restorable for 3 days.'),
+    (' 秒</td>', ' s</td>'),
+    ('成品原子写入下方位置并读回校验；之后在 Reports 页阅读、按时间轴浏览、按标签筛选，', 'Output is written atomically to the location below and verified by read-back; then read it in Reports — timeline view, tag filters, '),
 ]
 
 
 def _tr(html: str) -> str:
     if cfg_mod.load().get("app.language", "zh") != "en":
         return html
-    for zh, en in EN_MAP:
+    for zh, en in sorted(EN_MAP, key=lambda p: len(p[0]), reverse=True):
         html = html.replace(zh, en)
     return html
 
@@ -704,6 +833,17 @@ def refresh_models():
                             models=("err:" + ";".join(errs)) if errs else str(n)))
 
 
+@app.post("/set-language")
+def set_language():
+    check_csrf()
+    lang = request.form.get("lang", "zh")
+    if lang in ("zh", "en"):
+        c = cfg_mod.load()
+        c.data.setdefault("app", {})["language"] = lang
+        cfg_mod.save(c)
+    return "ok"
+
+
 @app.route("/update", methods=["POST"])
 def app_update():
     """按已发布的 Release 标签更新：只有打了 vX.Y.Z tag 并发布的版本
@@ -885,7 +1025,7 @@ async function refresh() {{
         det = `已等待 ${{mins}} 分钟（出稿后自动继续）`;
       }}
       return `<tr><td class=dim>${{esc(v.cname)}}</td>
-        <td class=t title="${{esc(v.title||v.video_id)}}"><div class=clamp>${{esc(v.title||v.video_id)}}</div></td>
+        <td class=t title="${{esc(v.title||v.video_id)}}"><div class=clamp>${{v.status==='verified' ? `<a href="/reports/${{v.video_id}}" style="color:inherit;text-decoration:underline dotted">${{esc(v.title||v.video_id)}}</a>` : esc(v.title||v.video_id)}}</div></td>
         <td class=dim>${{esc(_dur(v.duration_sec))}}</td>
         <td class=dim>${{esc((v.published_at||'').slice(0,10))}}</td>
         <td><span class="st ${{cls}}">${{Z[v.status]||v.status}}</span></td>
@@ -1639,7 +1779,7 @@ def settings():
 
 <div class=card><h3>⓪ 语言 / Language</h3>
 <table class=wrap>
-<tr><td>界面语言 / UI language</td><td><select name=language>
+<tr><td>界面语言 / UI language</td><td><select name=language onchange="fetch('/set-language',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'_csrf={CSRF}&lang='+this.value}}).then(()=>location.reload())">
 <option value=zh {dsel('zh', cfg.get('app.language','zh'))}>中文</option>
 <option value=en {dsel('en', cfg.get('app.language','zh'))}>English</option>
 </select></td></tr>
@@ -1648,7 +1788,7 @@ def settings():
  <span class=dim>按 GitHub Release 版本更新（未发布的提交不会推送）</span></td></tr>
 </table>
 <p class=dim>开始之前 / Before you start：<br>
-1. 先选择软件语言（保存后立即生效）/ Pick your UI language first — applies right after saving.<br>
+1. 界面语言选择后立即生效，无需保存 / UI language applies immediately when selected.<br>
 2. 本软件默认不内置任何 API key，需要你自己添加（见第 ⑥ 节）/ No API key ships by default — add your own in section ⑥.<br>
 3. 各 AI 环节可分别指定使用哪个 API（也在第 ⑥ 节）/ Each AI stage can use a different provider — also in section ⑥.</p></div>
 

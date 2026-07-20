@@ -153,9 +153,43 @@ META_SYSTEM = """根据文章的章节标题与摘句样本，生成元信息。
 只输出 JSON。"""
 
 
+import re as _re
+
+# 保留句的确定性清洗：不经 AI，硬约束不破——
+# 只删纯语气词、折叠重复叠词、补标点（相当于"最多一两个词的改动"）
+_FILLER_RE = _re.compile(
+    r"(?:^|(?<=[，。！？、；\s]))(?:呃+|嗯+|唉+|啊+|哎+|嘛|[eE]mm+)"
+    r"(?=$|[，。！？、；\s])")
+_DUP_RE = _re.compile(r"(就是|然后|那个|这个|所以|但是)\1+")
+_ANY_PUNCT = "。！？，、；：…"
+
+
+def _clean_quote(t: str) -> str:
+    t = _re.sub(r"\s+", " ", (t or "").strip())
+    t = _FILLER_RE.sub("", t)
+    t = _DUP_RE.sub(r"\1", t)
+    t = _re.sub(r"\s{2,}", " ", t)          # 删词后残留的双空格
+    t = _re.sub(r"\s+([，。！？、；：])", r"\1", t)
+    t = _re.sub(r"^[，、,;\s]+", "", t)
+    t = _re.sub(r"[，、,\s]+$", "", t)
+    return t
+
+
+def _join_quotes(texts: list[str]) -> str:
+    """相邻保留句拼接：句中缺标点补"，"，收尾补"。"。"""
+    parts = [t for t in texts if t]
+    out = []
+    for i, t in enumerate(parts):
+        if t[-1] not in _ANY_PUNCT:
+            t += "。" if i == len(parts) - 1 else "，"
+        out.append(t)
+    return "".join(out)
+
+
 def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
-    """选句式生成：AI 只挑句+写过渡，原句程序拷贝 → 保留率硬保证。"""
+    """选句式生成：AI 只挑句+写过渡，原句程序拷贝（含确定性清洗）→ 保留率硬保证。"""
     seg_by_id = {s.segment_id: s for s in can.segments}
+    cleaned = {s.segment_id: _clean_quote(s.text) for s in can.segments}
     sections = []
     for c in chunks:
         seg_ids = []
@@ -186,7 +220,7 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
         })
 
     def measure():
-        q = sum(len(seg_by_id[k].text) for sec in sections for k in sec["keep"])
+        q = sum(len(cleaned[k]) for sec in sections for k in sec["keep"])
         b = sum(len(sec["bridge"]) for sec in sections)
         total = q + b
         return (q / total if total else 1.0), q, b
@@ -217,7 +251,7 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
 
     out = []
     for sec in sections:
-        quote = "".join(seg_by_id[k].text for k in sec["keep"])
+        quote = _join_quotes([cleaned[k] for k in sec["keep"]])
         body = (sec["bridge"] + "\n\n" + quote) if sec["bridge"] else quote
         out.append({"heading": sec["heading"], "body": body,
                     "source_chunk_ids": sec["source_chunk_ids"]})

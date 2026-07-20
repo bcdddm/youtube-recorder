@@ -334,6 +334,10 @@ EN_MAP = [
     ("没有可汇总的文章。", "No articles to digest."),
     ("组：", "Groups: "), ("（无组）", "(ungrouped)"), ("移出组", "Remove from group"),
     ("引用来源", "References"), ("正在总结", "Summarizing"),
+    ("已加载缓存", "From cache"), ("新生成", "Fresh"), ("♻ 重新生成", "♻ Regenerate"),
+    ("选择现有组…", "Pick a group…"), ("或新建", "or new"),
+    ("加入组", "Add to group"), ("选择要移出的组…", "Group to remove…"),
+    ("从组移出", "Remove from"),
     ("的全部内容…", " — everything from that day…"),
     ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
 ]
@@ -412,16 +416,48 @@ def channels():
             con.executemany("UPDATE channels SET enabled=0 WHERE channel_id=?",
                             [(i,) for i in ids]); con.commit()
             msg = f'<span class=ok>已停用 {len(ids)} 个频道</span>'
-        elif f.get("bulk") == "cleargroup" and ids:
-            con.executemany("UPDATE channels SET grp='' WHERE channel_id=?",
-                            [(i,) for i in ids]); con.commit()
-            msg = f'<span class=ok>已把 {len(ids)} 个频道移出组</span>'
-        elif f.get("bulk") == "setgroup" and ids:
-            gname = f.get("grpname", "").strip()[:20]
-            con.executemany("UPDATE channels SET grp=? WHERE channel_id=?",
-                            [(gname, i) for i in ids]); con.commit()
-            msg = (f'<span class=ok>已把 {len(ids)} 个频道设为组'
-                   f'「{escape(gname) or "（无组）"}」</span>')
+        elif f.get("chip_del"):
+            cid_g = f["chip_del"].split("|", 1)
+            if len(cid_g) == 2:
+                cid2, g2 = cid_g
+                row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
+                                  (cid2,)).fetchone()
+                if row:
+                    gs = [x for x in _grps_of(row["grp"]) if x != g2]
+                    con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
+                                (_grps_join(gs), cid2)); con.commit()
+                    msg = '<span class=ok>已把该频道移出组「' + str(escape(g2)) + '」</span>'
+        elif f.get("bulk") == "addgroup" and ids:
+            gname = (f.get("grpnew", "").strip()
+                     or f.get("grpsel", "").strip())[:20]
+            if gname:
+                for i in ids:
+                    row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
+                                      (i,)).fetchone()
+                    gs = _grps_of(row["grp"] if row else "") + [gname]
+                    con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
+                                (_grps_join(gs), i))
+                con.commit()
+                msg = ('<span class=ok>已把 ' + str(len(ids))
+                       + ' 个频道加入组「' + str(escape(gname)) + '」</span>')
+            else:
+                msg = '<span class=bad>请选择现有组或输入新组名</span>'
+        elif f.get("bulk") == "removegroup" and ids:
+            target = f.get("rmgrp", "").strip()
+            for i in ids:
+                row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
+                                  (i,)).fetchone()
+                if not row:
+                    continue
+                gs = ([] if target == "__ALL__" else
+                      [x for x in _grps_of(row["grp"]) if x != target])
+                con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
+                            (_grps_join(gs), i))
+            con.commit()
+            label = ("全部组" if target == "__ALL__"
+                     else '组「' + str(escape(target)) + '」')
+            msg = ('<span class=ok>已把 ' + str(len(ids))
+                   + ' 个频道移出' + label + '</span>')
         elif f.get("bulk") == "delete" and ids:
             for i in ids:
                 _delete(i)
@@ -473,18 +509,31 @@ def channels():
                     + '<button name=act_del value=\'' + str(cid) + '\' '
                     + 'onclick="' + confirm_js + '">删除</button>')
         try:
-            grp = r["grp"] or ""
+            grps = _grps_of(r["grp"])
         except (KeyError, IndexError):
-            grp = ""
+            grps = []
+        chips = "".join(
+            "<span class=chip style='margin-left:0;margin-right:4px'>"
+            + str(escape(g))
+            + " <button name=chip_del value='" + str(cid) + "|" + str(escape(g))
+            + "' style='border:none;background:none;padding:0 2px;font-size:11px'"
+            + " title='移出该组'>×</button></span>"
+            for g in grps)
         parts.append(
             "<tr><td>" + chk + "</td>"
             + "<td>" + str(escape(r["name"] or ""))
-            + (("<br><span class=chip style='margin-left:0'>" + str(escape(grp))
-                + "</span>") if grp else "") + "</td>"
+            + (("<br>" + chips) if chips else "") + "</td>"
             + "<td class=dim>" + str(cid) + "</td>"
             + "<td class=dim>" + str(escape((r["not_before"] or "")[:10])) + "</td>"
             + "<td>" + stbadge + "</td><td>" + acts + "</td></tr>")
     rows = "".join(parts)
+    all_grps = sorted({g for row in dbm.list_channels(con)
+                       for g in _grps_of(row["grp"] if "grp" in row.keys() else "")})
+    grp_options = ('<option value="">选择现有组…</option>'
+                   + "".join('<option>' + str(escape(g)) + '</option>' for g in all_grps))
+    rm_options = ('<option value="">选择要移出的组…</option>'
+                  + "".join('<option>' + str(escape(g)) + '</option>' for g in all_grps)
+                  + '<option value="__ALL__">全部组</option>')
     suggs = con.execute(
         "SELECT src_channel_id, src_channel_name, COUNT(*) n FROM videos "
         "WHERE channel_id='MANUAL' AND src_channel_id IS NOT NULL "
@@ -523,9 +572,12 @@ def channels():
 <button name=bulk value=disable>批量停用</button>
 <button name=bulk value=delete
  onclick="return confirm('批量删除所选频道？已生成的文章会保留（归入手动添加）。')">批量删除</button>
-<span style="margin-left:12px">组名 <input name=grpname size=8 placeholder="如 财经">
-<button name=bulk value=setgroup>设为组</button>
-<button name=bulk value=cleargroup>移出组</button></span>
+<span style="margin-left:12px">
+<select name=grpsel>{grp_options}</select>
+或新建 <input name=grpnew size=7 placeholder="新组名">
+<button name=bulk value=addgroup>加入组</button>
+&nbsp;<select name=rmgrp>{rm_options}</select>
+<button name=bulk value=removegroup>从组移出</button></span>
 </div>
 <table><tr><th></th><th>名称</th><th>ID</th><th>起始日期</th><th>状态</th><th></th></tr>
 {rows or '<tr><td colspan=6 class=dim>暂无</td></tr>'}</table>
@@ -536,6 +588,14 @@ def channels():
 
 
 # --- Queue ------------------------------------------------------------------
+
+def _grps_of(raw: str) -> list:
+    return sorted({g.strip() for g in (raw or "").split(",") if g.strip()})
+
+
+def _grps_join(gs) -> str:
+    return ",".join(sorted({g.strip() for g in gs if g and g.strip()}))
+
 
 MANUAL_CHANNEL = "MANUAL"
 _VID_RE = __import__("re").compile(
@@ -897,7 +957,7 @@ def reports_json():
             "generated": r["at"][:10],
             "duration_sec": r["duration_sec"] or 0,
             "tags": tags,
-            "grp": (r["cgrp"] or "") if "cgrp" in r.keys() else "",
+            "grps": _grps_of(r["cgrp"]) if "cgrp" in r.keys() else [],
         })
     con.close()
     from flask import jsonify
@@ -915,11 +975,32 @@ DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视�
 只依据给定材料，不补充外部信息。宁可长，不可漏。"""
 
 
+DIGEST_KEEP_DAYS = 30
+
+
+def _digest_cache_path(date: str, grp: str):
+    from .paths import APP_SUPPORT
+    import hashlib as _h
+    d = APP_SUPPORT / "digests"
+    d.mkdir(parents=True, exist_ok=True)
+    # 清理超过 30 天的缓存
+    import time as _t
+    cutoff = _t.time() - DIGEST_KEEP_DAYS * 86400
+    for p in d.glob("*.md"):
+        if p.stat().st_mtime < cutoff:
+            p.unlink(missing_ok=True)
+    key = date + "__" + "+".join(sorted(x.strip() for x in grp.split(",") if x.strip()))
+    return d / (_h.sha256(key.encode()).hexdigest()[:16] + "__" + date + ".md")
+
+
 @app.route("/reports/digest", methods=["POST"])
 def reports_digest():
     check_csrf()
     date = request.form.get("date", "")[:10]
     grp = request.form.get("grp", "").strip()
+    force = request.form.get("force") == "1"
+    cache = _digest_cache_path(date, grp)
+    cached = cache.exists() and not force
     con = _con()
     rows = con.execute(
         "SELECT w.video_id, w.note_path, v.title, v.published_at, "
@@ -935,8 +1016,10 @@ def reports_digest():
         if (r["published_at"] or "")[:10] != date:
             continue
         if grp:
-            allowed = {g.strip() for g in grp.split(",")}
-            if (r["cgrp"] or "") not in allowed:
+            raw_sel = [g.strip() for g in grp.split(",")]
+            allowed = {g for g in raw_sel if g}
+            vg = set(_grps_of(r["cgrp"]))
+            if not ((vg & allowed) or ("" in raw_sel and not vg)):
                 continue
         meta = {}
         aj = work_dir(r["video_id"]) / "article.json"
@@ -963,14 +1046,18 @@ def reports_digest():
         return page("日报", "reports", body)
     from . import providers
     import json as _j
-    user = _j.dumps([{k: v for k, v in it.items() if k != "vid"}
-                     for it in items], ensure_ascii=False)[:60000]
-    try:
-        md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
-                                DIGEST_SYSTEM.format(date=date), user,
-                                max_tokens=5000, purpose="report_qa")
-    except Exception as e:
-        md = f"生成失败：{e}"
+    if cached:
+        md = cache.read_text(encoding="utf-8")
+    else:
+        user = _j.dumps([{k: v for k, v in it.items() if k != "vid"}
+                         for it in items], ensure_ascii=False)[:60000]
+        try:
+            md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
+                                    DIGEST_SYSTEM.format(date=date), user,
+                                    max_tokens=5000, purpose="report_qa")
+            cache.write_text(md, encoding="utf-8")
+        except Exception as e:
+            md = f"生成失败：{e}"
     html = _md_to_html(md, "digest")
     refs = "".join(
         '<li><a href="/reports/' + str(escape(it["vid"]))
@@ -978,9 +1065,18 @@ def reports_digest():
         + '</a> <span class=dim>· ' + str(escape(it["channel"])) + '</span></li>'
         for it in items)
     scope = ('组「' + str(escape(grp.replace(",", "+"))) + '」 · ') if grp else ""
+    cache_note = ('<span class="st ok" style="margin-left:8px">已加载缓存</span>'
+                  if cached else
+                  '<span class="st run" style="margin-left:8px">新生成</span>')
+    regen = (f'<form method=post action=/reports/digest style="display:inline;margin-left:8px">'
+             f'<input type=hidden name=_csrf value={CSRF}>'
+             f'<input type=hidden name=date value="{escape(date)}">'
+             f'<input type=hidden name=grp value="{escape(grp)}">'
+             f'<input type=hidden name=force value=1>'
+             f'<button style="font-size:12px;padding:2px 10px">♻ 重新生成</button></form>')
     body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
             f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
-            f' · 共 {len(items)} 篇</span>'
+            f' · 共 {len(items)} 篇</span>{cache_note}{regen}'
             f'<div class=md>{html}</div>'
             f'<div class=md style="margin-top:18px"><h2>引用来源</h2>'
             f'<ol>{refs}</ol></div></div>')
@@ -1037,7 +1133,7 @@ function filtered() {
   const ch = document.getElementById('chan').value;
   return DATA.filter(r => (!q || r.title.toLowerCase().includes(q) || r.channel.toLowerCase().includes(q))
                        && (!ch || r.channel === ch)
-                       && (!GRPS.size || GRPS.has(r.grp||''))
+                       && (!GRPS.size || ((r.grps&&r.grps.length) ? r.grps.some(g=>GRPS.has(g)) : GRPS.has('')))
                        && (!TAGS.size || (r.tags||[]).some(t=>TAGS.has(t))));
 }
 function tagsHtml(r) {
@@ -1128,7 +1224,7 @@ function render() {
   document.getElementById('tags').innerHTML = [...all].sort().map(t=>
     `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
   // 组胶囊（置顶排，多选）
-  const gAll = [...new Set(DATA.map(r=>r.grp).filter(Boolean))].sort();
+  const gAll = [...new Set(DATA.flatMap(r=>r.grps||[]))].sort();
   const gc = document.getElementById('grpcard');
   gc.style.display = gAll.length ? '' : 'none';
   document.getElementById('grpchips').innerHTML = gAll.map(g=>

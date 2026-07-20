@@ -566,18 +566,22 @@ def channels():
 <div class=card><h3>已订阅频道</h3>
 <form method=post>
 <input type=hidden name=_csrf value={CSRF}>
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
 <label><input type=checkbox onchange="document.querySelectorAll('input[name=cid]:not(:disabled)').forEach(c=>c.checked=this.checked)"> 全选</label>
 <button name=bulk value=enable>批量启用</button>
 <button name=bulk value=disable>批量停用</button>
 <button name=bulk value=delete
  onclick="return confirm('批量删除所选频道？已生成的文章会保留（归入手动添加）。')">批量删除</button>
-<span style="margin-left:12px">
+</div>
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;
+ padding-top:8px;border-top:1px solid var(--line)">
+<span class=dim>组：</span>
 <select name=grpsel>{grp_options}</select>
-或新建 <input name=grpnew size=7 placeholder="新组名">
+<span class=dim>或新建</span> <input name=grpnew size=8 placeholder="新组名">
 <button name=bulk value=addgroup>加入组</button>
-&nbsp;<select name=rmgrp>{rm_options}</select>
-<button name=bulk value=removegroup>从组移出</button></span>
+<span style="flex-basis:8px"></span>
+<select name=rmgrp>{rm_options}</select>
+<button name=bulk value=removegroup>从组移出</button>
 </div>
 <table><tr><th></th><th>名称</th><th>ID</th><th>起始日期</th><th>状态</th><th></th></tr>
 {rows or '<tr><td colspan=6 class=dim>暂无</td></tr>'}</table>

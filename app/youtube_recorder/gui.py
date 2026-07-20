@@ -135,7 +135,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .taginner{position:absolute;top:0;left:0;right:0;max-height:66px;overflow:hidden;
    background:var(--card);border-radius:10px;transition:max-height .18s ease;
    padding:2px 4px 6px;z-index:6}
- .tagwrap:hover .taginner{max-height:420px;overflow-y:auto;
+ .tagwrap:hover .taginner{max-height:198px;overflow-y:auto;
    border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.25)}
  .tlwrap{overflow-x:auto;padding-bottom:10px}
  .tl{display:flex;gap:22px;padding:8px 6px 14px;position:relative;min-width:max-content}
@@ -342,6 +342,13 @@ EN_MAP = [
     ("整理/召回/问答走 OpenAI 时使用", "Used when a stage routes to OpenAI"),
     ("走 Anthropic 时使用；可直接填任意模型名", "Used when routed to Anthropic; any model id accepted"),
     ("（可重排句序）", " (reorder allowed)"),
+    ("🔄 刷新模型列表", "🔄 Refresh model list"),
+    ("用你的 key 从各家官方 API 拉取当前可用模型", "Fetch currently available models from each provider API"),
+    ("模型列表已刷新（共", "Model list refreshed ("),
+    ("拉取模型列表部分失败：", "Model list fetch partly failed: "),
+    ("走 OpenAI 时使用", "Used when routed to OpenAI"),
+    ("走 Anthropic 时使用", "Used when routed to Anthropic"),
+    ("模型列表", "Model list"),
     ("的全部内容…", " — everything from that day…"),
     ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
 ]
@@ -642,6 +649,55 @@ def _ver_tuple(v: str) -> tuple:
     import re as _re
     nums = _re.findall(r"\d+", v or "")
     return tuple(int(n) for n in nums[:3]) or (0,)
+
+
+def _models_cache_path():
+    from .paths import APP_SUPPORT
+    return APP_SUPPORT / "models.json"
+
+
+def _load_models() -> dict:
+    import json as _j
+    p = _models_cache_path()
+    if p.exists():
+        try:
+            return _j.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"openai": [], "anthropic": []}
+
+
+@app.route("/ai/models", methods=["POST"])
+def refresh_models():
+    """用用户的 key 调各家官方 models API，拉取真实模型列表并缓存。"""
+    check_csrf()
+    from .creds import get_key
+    import json as _j
+    out = _load_models()
+    errs = []
+    if get_key("openai"):
+        try:
+            from openai import OpenAI
+            ms = [m.id for m in OpenAI(api_key=get_key("openai")).models.list()]
+            out["openai"] = sorted(
+                m for m in ms
+                if (m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")))
+                and not any(x in m for x in ("audio", "realtime", "tts",
+                                             "transcribe", "image", "search")))
+        except Exception as e:
+            errs.append(f"openai: {str(e)[:80]}")
+    if get_key("anthropic"):
+        try:
+            import anthropic
+            ms = anthropic.Anthropic(api_key=get_key("anthropic")).models.list()
+            out["anthropic"] = sorted(m.id for m in ms.data)
+        except Exception as e:
+            errs.append(f"anthropic: {str(e)[:80]}")
+    _models_cache_path().write_text(_j.dumps(out, ensure_ascii=False),
+                                    encoding="utf-8")
+    n = len(out.get("openai", [])) + len(out.get("anthropic", []))
+    return redirect(url_for("settings",
+                            models=("err:" + ";".join(errs)) if errs else str(n)))
 
 
 @app.route("/update", methods=["POST"])
@@ -1442,6 +1498,11 @@ def settings():
                + '，正在后台更新并重启——约半分钟后重新打开窗口即为新版</span>')
     elif upd == "err":
         msg = '<span class=bad>检查更新失败（网络或 git 仓库问题）</span>'
+    mres = request.args.get("models", "")
+    if mres.startswith("err:"):
+        msg = f'<span class=bad>拉取模型列表部分失败：{escape(mres[4:])}</span>'
+    elif mres:
+        msg = f'<span class=ok>模型列表已刷新（共 {escape(mres)} 个）</span>'
     if request.args.get("firstrun"):
         msg = ('<span class=bad>欢迎使用！请先在下方"API 凭证"中添加你自己的 '
                'AI 密钥（OpenAI 或 Anthropic 任一），添加后全部功能可用。</span>')
@@ -1545,6 +1606,21 @@ def settings():
         f"{'checked' if h in hours_now else ''}><span>{h:02d}</span></label>"
         for h in range(24))
     dsel = lambda v, cur: "selected" if v == cur else ""
+
+    def _model_opts(prov: str, fallback: list) -> str:
+        cur = cfg.get(f"article.model_{prov}",
+                      "gpt-4o-mini" if prov == "openai" else "claude-sonnet-5")
+        models = _load_models().get(prov) or fallback
+        if cur not in models:
+            models = [cur] + models
+        return "".join(
+            f'<option {"selected" if m == cur else ""}>{escape(m)}</option>'
+            for m in models)
+
+    oai_opts = _model_opts("openai", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"])
+    ant_opts = _model_opts("anthropic",
+                           ["claude-sonnet-5", "claude-haiku-4-5",
+                            "claude-opus-4-8"])
     cd = cfg.get("scheduler.confirm_dialog")
     tp = cfg.get("transcription.primary")
     am = cfg.get("article.mode")
@@ -1676,20 +1752,14 @@ def settings():
 <option value=openai {dsel('openai', cfg.get('ai.visuals','auto'))}>OpenAI</option>
 <option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option></select></td></tr>
 <tr><td>OpenAI 模型</td><td>
-<input name=model_openai list=dl_oai style="width:60%"
- value="{escape(cfg.get('article.model_openai','gpt-4o-mini'))}">
-<datalist id=dl_oai>
-<option value="gpt-4o-mini"><option value="gpt-4o">
-<option value="gpt-4.1-mini"><option value="gpt-4.1">
-<option value="o4-mini"></datalist>
-<span class=dim>整理/召回/问答走 OpenAI 时使用</span></td></tr>
+<select name=model_openai style="min-width:60%">{oai_opts}</select>
+<span class=dim>走 OpenAI 时使用</span></td></tr>
 <tr><td>Anthropic 模型</td><td>
-<input name=model_anthropic list=dl_ant style="width:60%"
- value="{escape(cfg.get('article.model_anthropic','claude-sonnet-5'))}">
-<datalist id=dl_ant>
-<option value="claude-sonnet-5"><option value="claude-haiku-4-5">
-<option value="claude-opus-4-8"></datalist>
-<span class=dim>走 Anthropic 时使用；可直接填任意模型名</span></td></tr>
+<select name=model_anthropic style="min-width:60%">{ant_opts}</select>
+<span class=dim>走 Anthropic 时使用</span></td></tr>
+<tr><td>模型列表</td><td>
+<button formaction=/ai/models formmethod=post>🔄 刷新模型列表</button>
+<span class=dim>用你的 key 从各家官方 API 拉取当前可用模型</span></td></tr>
 <tr><td>问 AI 用</td><td><select name=ai_qa>
 <option value=auto {dsel('auto', cfg.get('ai.qa','auto'))}>自动</option>
 <option value=openai {dsel('openai', cfg.get('ai.qa','auto'))}>OpenAI</option>

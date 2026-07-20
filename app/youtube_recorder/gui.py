@@ -123,6 +123,20 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
    color:var(--dim);cursor:pointer;transition:all .12s}
  .tagchip:hover{border-color:var(--acc);color:var(--acc)}
  .tagchip.on{background:var(--acc);color:var(--acctext);border-color:var(--acc)}
+ .grpbar{position:sticky;top:52px;z-index:8}
+ .busy{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99;
+   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+ .busy .ring{width:46px;height:46px;border-radius:50%;
+   border:4px solid rgba(255,255,255,.25);border-top-color:var(--acc);
+   animation:spin 0.9s linear infinite}
+ .busy .txt{color:#fff;font-size:15px}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ .tagwrap{position:relative;height:66px}
+ .taginner{position:absolute;top:0;left:0;right:0;max-height:66px;overflow:hidden;
+   background:var(--card);border-radius:10px;transition:max-height .18s ease;
+   padding:2px 4px 6px;z-index:6}
+ .tagwrap:hover .taginner{max-height:420px;overflow-y:auto;
+   border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.25)}
  .tlwrap{overflow-x:auto;padding-bottom:10px}
  .tl{display:flex;gap:22px;padding:8px 6px 14px;position:relative;min-width:max-content}
  .tl::before{content:'';position:absolute;top:31px;left:0;right:0;height:2px;
@@ -318,6 +332,10 @@ EN_MAP = [
     ("🧾 总结", "🧾 Digest"), ("当日情报汇总", "Daily digest"),
     ("← 返回时间轴", "← Back to timeline"),
     ("没有可汇总的文章。", "No articles to digest."),
+    ("组：", "Groups: "), ("（无组）", "(ungrouped)"), ("移出组", "Remove from group"),
+    ("引用来源", "References"), ("正在总结", "Summarizing"),
+    ("的全部内容…", " — everything from that day…"),
+    ("要覆盖每一条要点，请稍候（约 10–30 秒）", "Covering every point — hold on (10–30s)"),
 ]
 
 
@@ -394,6 +412,10 @@ def channels():
             con.executemany("UPDATE channels SET enabled=0 WHERE channel_id=?",
                             [(i,) for i in ids]); con.commit()
             msg = f'<span class=ok>已停用 {len(ids)} 个频道</span>'
+        elif f.get("bulk") == "cleargroup" and ids:
+            con.executemany("UPDATE channels SET grp='' WHERE channel_id=?",
+                            [(i,) for i in ids]); con.commit()
+            msg = f'<span class=ok>已把 {len(ids)} 个频道移出组</span>'
         elif f.get("bulk") == "setgroup" and ids:
             gname = f.get("grpname", "").strip()[:20]
             con.executemany("UPDATE channels SET grp=? WHERE channel_id=?",
@@ -502,7 +524,8 @@ def channels():
 <button name=bulk value=delete
  onclick="return confirm('批量删除所选频道？已生成的文章会保留（归入手动添加）。')">批量删除</button>
 <span style="margin-left:12px">组名 <input name=grpname size=8 placeholder="如 财经">
-<button name=bulk value=setgroup>设为组</button></span>
+<button name=bulk value=setgroup>设为组</button>
+<button name=bulk value=cleargroup>移出组</button></span>
 </div>
 <table><tr><th></th><th>名称</th><th>ID</th><th>起始日期</th><th>状态</th><th></th></tr>
 {rows or '<tr><td colspan=6 class=dim>暂无</td></tr>'}</table>
@@ -881,12 +904,15 @@ def reports_json():
     return jsonify(out)
 
 
-DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视频文章的元信息
-（标题/频道/摘要/要点）。输出当日汇总报告（Markdown）：
+DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视频文章的完整材料
+（标题/频道/摘要/全部要点/章节标题）。输出当日汇总报告（Markdown），要求：
 # 当日情报汇总（{date}）
-先写 3-5 句总览；然后按主题归并要点（每条标注来源视频标题）；
-最后一节"值得注意"：各来源间的分歧观点或共同强调的信号。
-只依据给定材料，不补充外部信息。"""
+1. 总览：3-5 句概括当天信息全貌。
+2. 按主题归并的详细要点：**必须覆盖材料中的每一条要点，一条都不许漏**；
+   同主题合并叙述但保留各自的具体数字与结论；
+   每条要点末尾用【标题】标注来源文章。
+3. "值得注意"：各来源间的分歧观点、共同强调的信号、以及孤立但重要的单点信息。
+只依据给定材料，不补充外部信息。宁可长，不可漏。"""
 
 
 @app.route("/reports/digest", methods=["POST"])
@@ -908,8 +934,10 @@ def reports_digest():
         day = (r["published_at"] or r["note_path"] or "")[:10]
         if (r["published_at"] or "")[:10] != date:
             continue
-        if grp and (r["cgrp"] or "") != grp:
-            continue
+        if grp:
+            allowed = {g.strip() for g in grp.split(",")}
+            if (r["cgrp"] or "") not in allowed:
+                continue
         meta = {}
         aj = work_dir(r["video_id"]) / "article.json"
         try:
@@ -918,10 +946,13 @@ def reports_digest():
         except Exception:
             pass
         items.append({
+            "vid": r["video_id"],
             "title": meta.get("title_zh") or r["title"] or r["video_id"],
             "channel": r["cname"] or "",
             "summary": meta.get("summary", ""),
-            "takeaways": meta.get("takeaways", [])[:6],
+            "takeaways": meta.get("takeaways", []),
+            "sections": [sec.get("heading", "")
+                         for sec in meta.get("sections", [])][:12],
         })
     con.close()
     if not items:
@@ -932,19 +963,27 @@ def reports_digest():
         return page("日报", "reports", body)
     from . import providers
     import json as _j
-    user = _j.dumps(items, ensure_ascii=False)[:40000]
+    user = _j.dumps([{k: v for k, v in it.items() if k != "vid"}
+                     for it in items], ensure_ascii=False)[:60000]
     try:
         md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
                                 DIGEST_SYSTEM.format(date=date), user,
-                                max_tokens=3000, purpose="report_qa")
+                                max_tokens=5000, purpose="report_qa")
     except Exception as e:
         md = f"生成失败：{e}"
     html = _md_to_html(md, "digest")
-    scope = ('组「' + str(escape(grp)) + '」 · ') if grp else ""
+    refs = "".join(
+        '<li><a href="/reports/' + str(escape(it["vid"]))
+        + '" style="color:var(--acc)">' + str(escape(it["title"]))
+        + '</a> <span class=dim>· ' + str(escape(it["channel"])) + '</span></li>'
+        for it in items)
+    scope = ('组「' + str(escape(grp.replace(",", "+"))) + '」 · ') if grp else ""
     body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
             f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
             f' · 共 {len(items)} 篇</span>'
-            f'<div class=md>{html}</div></div>')
+            f'<div class=md>{html}</div>'
+            f'<div class=md style="margin-top:18px"><h2>引用来源</h2>'
+            f'<ol>{refs}</ol></div></div>')
     return page("日报", "reports", body)
 
 
@@ -962,6 +1001,8 @@ def reports_bulk_delete():
 
 
 _REPORTS_TMPL = """
+<div class="card grpbar" id=grpcard style="display:none;padding:8px 14px">
+<span class=dim style="margin-right:4px">组：</span><span id=grpchips></span></div>
 <div class=tabs>
 <button data-m=timeline class=on>📅 时间轴</button>
 <button data-m=read>📖 阅读</button>
@@ -970,13 +1011,15 @@ _REPORTS_TMPL = """
 <div class=card style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
 <input id=q placeholder="搜索标题…" style="flex:1;min-width:180px" oninput="render()">
 <select id=chan onchange="render()"><option value="">全部频道</option></select>
-<select id=grpsel onchange="render()"><option value="">全部组</option></select>
 <select id=grp onchange="render()">
 <option value=date>按日期分组</option>
 <option value=channel>按频道分组</option>
 <option value=flat>平铺列表</option></select>
 <span id=count class=dim></span></div>
-<div class=card id=tagbar style="display:none"><span class=dim style="margin-right:6px">标签：</span><span id=tags></span></div>
+<div class=card id=tagbar style="display:none;padding:10px 14px 8px">
+<div class=tagwrap><div class=taginner>
+<span class=dim style="margin-right:6px">标签：</span><span id=tags></span>
+</div></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
 <table><thead><tr><th>标题</th><th>删除于</th><th>剩余</th><th></th></tr></thead>
@@ -984,23 +1027,24 @@ _REPORTS_TMPL = """
 <div id=dd-empty style="display:none"><div class=empty>__DOODLE__这里还什么都没有</div></div>
 <script>
 const CSRF_T = "__CSRF__";
-let DATA = [], MODE = 'timeline', TAG = null;
+let DATA = [], MODE = 'timeline';
+let TAGS = new Set(), GRPS = new Set();
 function esc(s) { return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
 function dur(s) { if(!s) return ''; const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
   return h? h+'小时'+m+'分' : m+'分钟'; }
 function filtered() {
   const q = document.getElementById('q').value.toLowerCase();
   const ch = document.getElementById('chan').value;
-  const gsel = document.getElementById('grpsel').value;
   return DATA.filter(r => (!q || r.title.toLowerCase().includes(q) || r.channel.toLowerCase().includes(q))
                        && (!ch || r.channel === ch)
-                       && (!gsel || (r.grp||'') === gsel)
-                       && (!TAG || (r.tags||[]).includes(TAG)));
+                       && (!GRPS.size || GRPS.has(r.grp||''))
+                       && (!TAGS.size || (r.tags||[]).some(t=>TAGS.has(t))));
 }
 function tagsHtml(r) {
-  return (r.tags||[]).map(t=>`<span class=tagchip onclick="setTag('${esc(t)}');event.stopPropagation()">${esc(t)}</span>`).join('');
+  return (r.tags||[]).map(t=>`<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}');event.stopPropagation()">${esc(t)}</span>`).join('');
 }
-function setTag(t) { TAG = (TAG === t) ? null : t; render(); }
+function setTag(t) { TAGS.has(t) ? TAGS.delete(t) : TAGS.add(t); render(); }
+function setGrp(g) { GRPS.has(g) ? GRPS.delete(g) : GRPS.add(g); render(); }
 function item(r) {
   return `<tr><td class=t title="${esc(r.title)}"><div class=clamp><a href="/reports/${esc(r.video_id)}" style="color:var(--acc);text-decoration:none">${esc(r.title)}</a></div>${tagsHtml(r)}</td>
   <td class=dim>${esc(r.channel)}</td><td class=dim>${esc(r.published)}</td>
@@ -1052,7 +1096,11 @@ function renderManage(rows) {
   return `<div class=card>${head}${body}</table></div>`;
 }
 function digest(d) {
-  const gsel = document.getElementById('grpsel').value;
+  const o = document.createElement('div'); o.className = 'busy';
+  o.innerHTML = `<div class=ring></div><div class=txt>正在总结 ${esc(d)} 的全部内容…<br>
+    <span style="font-size:12px;opacity:.7">要覆盖每一条要点，请稍候（约 10–30 秒）</span></div>`;
+  document.body.appendChild(o);
+  const gsel = [...GRPS].join(',');
   const f = document.createElement('form'); f.method='post'; f.action='/reports/digest';
   f.innerHTML = `<input type=hidden name=_csrf value="${CSRF_T}">
     <input type=hidden name=date value="${d}">
@@ -1069,13 +1117,23 @@ function bulkDelete() {
 }
 function render() {
   const rows = filtered();
-  document.getElementById('count').textContent = `${rows.length} 篇` + (TAG ? ` · #${TAG}` : '');
+  const scope = [...GRPS].join('+');
+  document.getElementById('count').textContent =
+    `${rows.length} 篇` + (scope ? ` · 组:${scope}` : '') +
+    (TAGS.size ? ` · #${[...TAGS].join(' #')}` : '');
   // 标签栏
   const all = new Set(); DATA.forEach(r=>(r.tags||[]).forEach(t=>all.add(t)));
   const tb = document.getElementById('tagbar');
   tb.style.display = all.size ? '' : 'none';
   document.getElementById('tags').innerHTML = [...all].sort().map(t=>
-    `<span class="tagchip ${TAG===t?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
+    `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
+  // 组胶囊（置顶排，多选）
+  const gAll = [...new Set(DATA.map(r=>r.grp).filter(Boolean))].sort();
+  const gc = document.getElementById('grpcard');
+  gc.style.display = gAll.length ? '' : 'none';
+  document.getElementById('grpchips').innerHTML = gAll.map(g=>
+    `<span class="tagchip ${GRPS.has(g)?'on':''}" onclick="setGrp('${esc(g)}')">${esc(g)}</span>`).join('')
+    + `<span class="tagchip ${GRPS.has('')?'on':''}" onclick="setGrp('')">（无组）</span>`;
   const html = MODE==='timeline' ? renderTimeline(rows)
              : MODE==='manage'   ? renderManage(rows)
              : renderRead(rows);
@@ -1092,10 +1150,6 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   const chans = [...new Set(DATA.map(r=>r.channel))].sort();
   document.getElementById('chan').innerHTML =
     '<option value="">全部频道</option>' + chans.map(c=>`<option>${esc(c)}</option>`).join('');
-  const grps = [...new Set(DATA.map(r=>r.grp).filter(Boolean))].sort();
-  const gs = document.getElementById('grpsel');
-  gs.style.display = grps.length ? '' : 'none';
-  gs.innerHTML = '<option value="">全部组</option>' + grps.map(g=>`<option>${esc(g)}</option>`).join('');
   render();
   const trash = await (await fetch('/trash.json')).json();
   if (trash.length) {

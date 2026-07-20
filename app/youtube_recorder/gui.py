@@ -131,12 +131,11 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
    animation:spin 0.9s linear infinite}
  .busy .txt{color:#fff;font-size:15px}
  @keyframes spin{to{transform:rotate(360deg)}}
- .tagwrap{position:relative;height:66px}
- .taginner{position:absolute;top:0;left:0;right:0;max-height:66px;overflow:hidden;
+ .tagwrap{position:relative}
+ .taginner{position:absolute;top:0;left:0;right:0;overflow:hidden;
    background:var(--card);border-radius:10px;transition:max-height .18s ease;
-   padding:2px 4px 6px;z-index:6}
- .tagwrap:hover .taginner{max-height:198px;overflow-y:auto;
-   border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.25)}
+   padding:2px 4px 6px;z-index:7}
+ .taginner.open{border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.25)}
  .tlwrap{overflow-x:auto;padding-bottom:10px}
  .tl{display:flex;gap:22px;padding:8px 6px 14px;position:relative;min-width:max-content}
  .tl::before{content:'';position:absolute;top:31px;left:0;right:0;height:2px;
@@ -484,6 +483,10 @@ EN_MAP = [
     ('也可以对任何一篇"问 AI"或让它重新总结。删除的文章进回收站，3 天内可恢复。', 'per-article "Ask AI", or re-summarize. Deleted articles go to Trash, restorable for 3 days.'),
     (' 秒</td>', ' s</td>'),
     ('成品原子写入下方位置并读回校验；之后在 Reports 页阅读、按时间轴浏览、按标签筛选，', 'Output is written atomically to the location below and verified by read-back; then read it in Reports — timeline view, tag filters, '),
+    ('🏷 AI 归并同义标签', '🏷 AI-merge similar tags'),
+    ('归并中…（AI 分析全部标签）', 'Merging… (AI analyzing all tags)'),
+    ('已合并 ${d.merged} 个同义标签（共 ${d.total} 个）', 'Merged ${d.merged} similar tags (of ${d.total})'),
+    ('归并失败', 'Merge failed'),
 ]
 
 
@@ -1148,13 +1151,15 @@ def reports_json():
         "WHERE w.note_kind='wiki' GROUP BY w.video_id ORDER BY w.at DESC").fetchall()
     import json as _json
     from .paths import work_dir
+    tmap = _load_tagmap()
     out = []
     for r in rows:
         tags = []
         try:
             aj = work_dir(r["video_id"]) / "article.json"
             if aj.exists():
-                tags = _json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6]
+                tags = _merge_tags(
+                    _json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6], tmap)
         except Exception:
             pass
         out.append({
@@ -1170,6 +1175,88 @@ def reports_json():
     con.close()
     from flask import jsonify
     return jsonify(out)
+
+
+TAGMERGE_SYSTEM = """你是标签归并助手。给你一组文章标签（JSON 数组）。把意思相同或属于同一主题家族的标签分组合并，每组选一个规范名。
+规则：
+- 规范名选组内最短、最通用的（例：AI、AI 技术、AI 投资 → AI；财报、财报季、财报分析 → 财报）。
+- 只合并确实同义或同一主题家族的标签，拿不准就不合并。
+- 未出现在任何组里的标签保持原样。
+只输出 JSON：{"groups":[{"canon":"AI","alts":["AI 技术","AI 投资"]}]}"""
+
+
+def _tagmap_path():
+    from .paths import APP_SUPPORT
+    return APP_SUPPORT / "tags-merge.json"
+
+
+def _load_tagmap() -> dict:
+    try:
+        import json as _j
+        return _j.loads(_tagmap_path().read_text(encoding="utf-8")).get("map", {})
+    except Exception:
+        return {}
+
+
+def _merge_tags(tags, tmap):
+    out = []
+    for t in tags or []:
+        c = tmap.get(t, t)
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _all_article_tags(con) -> list:
+    import json as _json
+    from .paths import work_dir
+    rows = con.execute(
+        "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+    tags = set()
+    for r in rows:
+        try:
+            aj = work_dir(r["video_id"]) / "article.json"
+            if aj.exists():
+                tags.update(_json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6])
+        except Exception:
+            pass
+    return sorted(tags)
+
+
+@app.post("/tags/merge")
+def tags_merge():
+    check_csrf()
+    import json as _j
+    from . import providers
+    con = _con()
+    tags = _all_article_tags(con)
+    con.close()
+    if len(tags) < 2:
+        return {"ok": True, "merged": 0, "total": len(tags)}
+    try:
+        raw = providers.complete(cfg_mod.load(), None, "tag-merge",
+                                 TAGMERGE_SYSTEM,
+                                 _j.dumps(tags, ensure_ascii=False),
+                                 max_tokens=2000, purpose="report_qa").strip()
+        groups = _j.loads(raw[raw.index("{"):raw.rindex("}") + 1]).get("groups", [])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}, 502
+    tmap = {}
+    tagset = set(tags)
+    for g in groups:
+        canon = (g.get("canon") or "").strip()
+        if not canon:
+            continue
+        for a in g.get("alts") or []:
+            a = (a or "").strip()
+            if a and a != canon and a in tagset:
+                tmap[a] = canon
+    # 防环/防链：canon 本身不允许再指向别处
+    tmap = {a: c for a, c in tmap.items() if c not in tmap}
+    _tagmap_path().write_text(_j.dumps(
+        {"map": tmap, "made": dbm.now(), "tags": tags},
+        ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"ok": True, "merged": len(tmap), "total": len(tags)}
 
 
 DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视频文章的完整材料
@@ -1320,10 +1407,12 @@ _REPORTS_TMPL = """
 <option value=channel>按频道分组</option>
 <option value=flat>平铺列表</option></select>
 <span id=count class=dim></span></div>
-<div class=card id=tagbar style="display:none;padding:10px 14px 8px">
+<div class=card id=tagbar style="display:none;padding:10px 14px 8px;overflow:visible">
 <div class=tagwrap><div class=taginner>
 <span class=dim style="margin-right:6px">标签：</span><span id=tags></span>
-</div></div></div>
+</div></div>
+<div style="text-align:right;margin-top:2px"><button id=mtbtn
+ style="font-size:11px;padding:1px 8px" onclick="mergeTags()">🏷 AI 归并同义标签</button></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
 <table><thead><tr><th>标题</th><th>删除于</th><th>剩余</th><th></th></tr></thead>
@@ -1419,6 +1508,29 @@ function bulkDelete() {
   f.innerHTML = `<input type=hidden name=_csrf value="${CSRF_T}"><input type=hidden name=ids value="${ids.join(',')}">`;
   document.body.appendChild(f); f.submit();
 }
+function layoutTags() {
+  const wrap = document.querySelector('#tagbar .tagwrap'); if (!wrap) return;
+  const tb = document.getElementById('tagbar');
+  if (tb.style.display === 'none') return;
+  const inner = wrap.querySelector('.taginner');
+  inner.classList.remove('open');
+  inner.style.maxHeight = 'none'; inner.style.overflowY = 'hidden';
+  const tops = [...new Set([...inner.querySelectorAll('.tagchip')].map(c => c.offsetTop))]
+    .sort((a, b) => a - b);
+  const full = inner.scrollHeight;
+  const coll = tops.length > 2 ? tops[2] : full;   // 折叠 = 恰好两行（第三行起始处裁切）
+  const exp = Math.min(full, coll * 3);            // 悬停 = 最多三倍，再多才滚动
+  wrap.style.height = coll + 'px';
+  inner.style.maxHeight = coll + 'px';
+  wrap.onmouseenter = () => { if (tops.length <= 2) return;
+    inner.classList.add('open');
+    inner.style.maxHeight = exp + 'px';
+    inner.style.overflowY = full > exp ? 'auto' : 'hidden'; };
+  wrap.onmouseleave = () => { inner.classList.remove('open');
+    inner.style.maxHeight = coll + 'px';
+    inner.style.overflowY = 'hidden'; inner.scrollTop = 0; };
+}
+window.addEventListener('resize', layoutTags);
 function render() {
   const rows = filtered();
   const scope = [...GRPS].join('+');
@@ -1431,6 +1543,7 @@ function render() {
   tb.style.display = all.size ? '' : 'none';
   document.getElementById('tags').innerHTML = [...all].sort().map(t=>
     `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
+  layoutTags();
   // 组胶囊（置顶排，多选）
   const gAll = [...new Set(DATA.flatMap(r=>r.grps||[]))].sort();
   const gc = document.getElementById('grpcard');
@@ -1449,6 +1562,23 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); MODE = b.dataset.m; render();
 });
+async function reloadData() {
+  DATA = await (await fetch('/reports.json')).json();
+  render();
+}
+async function mergeTags() {
+  const b = document.getElementById('mtbtn');
+  b.disabled = true; b.textContent = '归并中…（AI 分析全部标签）';
+  try {
+    const r = await fetch('/tags/merge', {method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'_csrf=' + CSRF_T});
+    const d = await r.json();
+    if (d.ok) { b.textContent = `已合并 ${d.merged} 个同义标签（共 ${d.total} 个）`; await reloadData(); }
+    else b.textContent = '归并失败：' + (d.error || '');
+  } catch (e) { b.textContent = '归并失败'; }
+  setTimeout(() => { b.textContent = '🏷 AI 归并同义标签'; b.disabled = false; }, 5000);
+}
 (async () => {
   DATA = await (await fetch('/reports.json')).json();
   const chans = [...new Set(DATA.map(r=>r.channel))].sort();

@@ -80,3 +80,12 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all P9 tests passed")
+
+
+def test_tag_merge_helpers():
+    import youtube_recorder.gui as gui
+    tmap = {"AI 技术": "AI", "AI 投资": "AI", "财报季": "财报", "财报分析": "财报"}
+    assert gui._merge_tags(["AI", "AI 技术", "美联储"], tmap) == ["AI", "美联储"]
+    assert gui._merge_tags(["AI 投资", "财报季", "财报分析"], tmap) == ["AI", "财报"]
+    assert gui._merge_tags([], tmap) == []
+    assert gui._merge_tags(["新能源"], {}) == ["新能源"]

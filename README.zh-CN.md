@@ -2,30 +2,27 @@
 
 [English](README.md) | 中文
 
-YouTube 订阅 → 自动转录 → AI 整理成文（含智能截图）→ 写入 Obsidian。v0.3.0
+YouTube 订阅 → 自动转录 → AI 整理成文（含智能截图）→ 写入 Obsidian。本地优先的 macOS 菜单栏应用。当前版本 **v0.4.2**。
 
-## v0.3.0 亮点（2026-07-20）
+## 它做什么
 
-菜单栏托盘常驻（关窗不退出）、原生窗口 App、深浅双主题（Notion 风）+ Haring 风手绘插图、
-两段式运行模式（自动/确认，均可随时跳过单条）、单视频链接直接处理、文章库搜索/分组/回收站（3 天可恢复）、
-报告内"问 AI"细节查询与一键重新总结、Reports 保存位置可改+一键迁移、图片自动重试+手动刷新、
-LLM 智能截图召回（叙述式财经视频也能配图）、守候式转录回收（出稿即成文不等下一轮）、
-arm64 架构修复、首次使用强制引导配置 API 密钥。
+订阅 YouTube 频道（或粘贴单个视频链接）。按你设定的排班表自动发现新视频：有字幕直接抓取，无字幕转录音频；把完整口述文稿改写成可读的中文文章（忠实、可溯源到时间码、不丢中段），按内容语义截取画面插入对应章节，最后写入 Obsidian 库或独立文件夹——完整原文以可折叠块附在文末。
 
-## 当前状态（2026-07-19）
+## v0.4 亮点
 
-**P0–P9 全部完成并在真实数据上验证。**
-
-- P6 视觉截图：规则召回（中英显式/隐式提示词）→ 低清片段下载 → t±2s 三帧抽取 → 清晰度选帧 → aHash 去重 → 按密度 1–5 插入文章对应章节；talking-head 视频自动不配图（宁缺毋滥）。视觉模型复核（vision QA）留作 v0.3。
-- P9 GUI：`python3 -m youtube_recorder.cli gui` → http://127.0.0.1:8765 。四页：Channels（加频道/启停）、Queue（状态总览/重试）、Reports（文章列表 + Markdown 阅读器，含 vault 图片安全路由）、Settings（**24 小时排班表**、弹窗策略、转录方式、文章模式、截图密度拖杆、vault 路径、API key 钥匙串管理）。保存排班表自动重写 plist 并 reload launchd。安全：仅监听 127.0.0.1，全 POST 校验 CSRF，vault 路径逃逸拦截。
-
-已跑通的完整闭环：RSS 发现新视频 → 无字幕检测 → 音频下载 → MacWhisper Watch Folder 转录 → SRT 校验（幻觉裁剪/越界裁剪）→ 分块全文 AI 改写（不丢中段，带溯源）→ Obsidian 双产物写入（`20-Raw/YouTube` 不可变原料 + `30-Wiki` 文章，read-back 校验）。
-
-首批两篇成品：`30-Wiki/美股市场动态与AI新模型影响--pvq2_MY8VFY.md`、`30-Wiki/台积电、谷歌与奈飞的市场动态--KueAYEGSolI.md`。
+- **原文保留档位**：0/40/50/60/70/80/90/100%——正文中至少该比例的字符**逐字来自原文**（程序保证：AI 只选句和写过渡，被选句子由程序原样拷贝，不足自动补齐，实测值写入 frontmatter）。70% 以下允许 AI 重排句序；无意义句可剔除；保留句只许"修正"（改动少于 3 个词）不许改写。
+- **AI 重标点**：转录稿口语流重新断句加标点，剥标点逐字校验保证内容零改动，校验失败自动回退机械补标。另有确定性语气词清理与错别字校对轮。
+- **按事件分段**：每个事件一节、每节不超过 600 字（2 分钟内读完），超长自动拆分。
+- **智能截图密度 1–5**：规则召回 + LLM 推断（叙述式视频也能配图）；**5 级程序保证每个自然段至少一张配图**（无命中画面时按该段时间点自动截取，写入时逐节分配）。
+- **Reports 报告库**：横向时间轴默认视图、组胶囊多选筛选、标签云（实测行高折叠两行、悬停展开三倍再滚动）、**AI 归并同义标签**（如"AI 技术/AI 投资→AI"，展示层映射、原始数据不动）、当日情报汇总（全要点覆盖+【标题】溯源，30 天缓存同条件秒开）、文章内"问 AI"与一键重新总结、回收站 3 天可恢复。
+- **分环节 AI 路由**：整理/截图/问答可分别指定 OpenAI 或 Anthropic，并选择具体模型（用你的 key 实时拉取各家最新模型列表）。
+- **中英双语界面**：设置第 ⓪ 节选语言，选择即全局生效；语言区块永久双语。
+- **按 Release 版本更新**：软件内"检查更新"只跟随已发布的 GitHub Release 标签，main 上未发布的提交不会推送给用户。
+- **频道多组管理**：一个频道可属多个组，按组筛选报告与汇总范围；队列中已完成条目标题直达阅读页。
 
 ## 自动运行
 
-launchd 已启用（`com.leoluchino.youtube-recorder`）：每偶数小时整点运行，登录时补跑；发现新视频时弹窗 30 秒可取消，取消则顺延下一轮。
+launchd 常驻（`com.leoluchino.youtube-recorder`）：按排班表整点运行，睡眠错过的唤醒后合并补跑；发现新视频时弹窗 30 秒可取消。菜单栏托盘常驻，关窗不退出。
 
 ## 常用命令
 
@@ -34,9 +31,10 @@ cd "~/Coding/YouTube Recorder/app"
 python3 -m youtube_recorder.cli status              # 各阶段数量
 python3 -m youtube_recorder.cli run --once          # 手动跑一轮
 python3 -m youtube_recorder.cli channels add <URL>  # 加频道
-python3 -m youtube_recorder.cli channels list
 python3 -m youtube_recorder.cli inspect <VIDEO_ID>  # 单视频全记录
 python3 -m youtube_recorder.cli retry <VIDEO_ID> --from <STAGE>
+python3 -m youtube_recorder.cli tray                # 托盘 + GUI（127.0.0.1:8765）
+./scripts/build_app.sh                              # 打包双击可开的 .app
 ```
 
 ## 关键路径
@@ -48,12 +46,15 @@ python3 -m youtube_recorder.cli retry <VIDEO_ID> --from <STAGE>
 | 数据库/日志/工作目录 | 同上目录下 `state.sqlite3` / `logs/` / `work/` |
 | MacWhisper 投放箱 | `~/Coding/YouTube Recorder/macwhisper-inbox/` |
 | API key | macOS 钥匙串（`ytrec-openai` / `ytrec-anthropic`），不进配置文件 |
-| 产出 | Obsidian Vault `20-Raw/YouTube/`（原料）+ `30-Wiki/`（文章） |
+| 产出 | Obsidian Vault `20-Raw/YouTube/`（原料，不可变）+ `30-Wiki/`（文章）+ `40-Attachments/YouTube/`（截图）；或独立文件夹（分层/纯平铺） |
 
-## 下一步（v0.3 backlog）
+## 可靠性与安全
 
-- 视觉模型复核截图相关性（vision QA）、OCR 评分、`[[wikilink]]` 完整解析、OpenAI 音频 API 备用适配器的切块实跑验证、P10 canary（连续 72h 无人值守观察）。
-- 建议：把 20-Raw/YouTube 例外条款正式写进 vault 的 AGENTS.md；OpenAI key 曾在对话中明文出现过，建议 rotate。
+SQLite 状态机（按视频 ID 幂等）、原子写入 + 读回校验、结构化 JSONL 日志（密钥自动脱敏）、分类重试策略。API key 只存钥匙串；GUI 仅监听 127.0.0.1，全 POST 校验 CSRF，vault 路径逃逸拦截。个人私用工具，请遵守 YouTube 服务条款与版权法。
+
+## 下一步（backlog）
+
+视觉模型复核截图相关性（vision QA）、`[[wikilink]]` 完整解析、OpenAI 音频切块路径实跑验证、P10 canary 72h 报告。
 
 ## 测试
 

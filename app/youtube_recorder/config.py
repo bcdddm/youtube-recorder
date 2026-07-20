@@ -25,6 +25,8 @@ VALID_ARTICLE_MODES = ("edited_article", "faithful_cleanup", "wiki_note")
 VALID_DIALOG_POLICY = ("on_new_videos", "always", "never")
 VALID_ON_DIALOG_ERROR = ("run", "skip")
 VALID_LAYOUTS = ("vault", "folder_split", "folder_flat")
+VALID_LANGS = ("zh", "en")
+VALID_AI_ROUTES = ("auto", "openai", "anthropic")
 
 
 class ConfigError(ValueError):
@@ -32,7 +34,13 @@ class ConfigError(ValueError):
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "app": {"name": APP_NAME, "branding": AUTHOR},
+    "app": {"name": APP_NAME, "branding": AUTHOR,
+            "language": "zh"},  # zh | en
+    "ai": {  # 各环节分别用哪家 API：auto=用已配置的（都配了优先 OpenAI）
+        "article": "auto",   # 整理成文
+        "visuals": "auto",   # 截图智能召回
+        "qa": "auto",        # 报告内问答
+    },
     "vault": {
         "root": "",  # set via GUI/CLI before vault writes are enabled
         "raw_subdir": "20-Raw/YouTube",
@@ -181,6 +189,13 @@ def validate(data: dict[str, Any]) -> list[str]:
           isinstance(d.get("max_new_videos_per_run"), int) and d["max_new_videos_per_run"] >= 1,
           "must be int >= 1")
 
+    check("app.language",
+          data.get("app", {}).get("language", "zh") in VALID_LANGS,
+          f"must be one of {VALID_LANGS}")
+    for k in ("article", "visuals", "qa"):
+        check(f"ai.{k}",
+              data.get("ai", {}).get(k, "auto") in VALID_AI_ROUTES,
+              f"must be one of {VALID_AI_ROUTES}")
     check("vault.layout",
           data.get("vault", {}).get("layout", "vault") in VALID_LAYOUTS,
           f"must be one of {VALID_LAYOUTS}")

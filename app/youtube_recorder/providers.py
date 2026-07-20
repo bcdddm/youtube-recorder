@@ -78,11 +78,28 @@ def _call_openai(model: str, system: str, user: str, max_tokens: int):
 _CALLERS = {"anthropic": _call_anthropic, "openai": _call_openai}
 
 
+PURPOSE_GROUP = {
+    "chunk_notes": "article", "chunk_notes_retry": "article",
+    "compose": "article", "compose_retry": "article",
+    "visual_recall": "visuals", "report_qa": "qa",
+}
+
+
+def _route(cfg, purpose: str) -> list[str]:
+    """按环节选择 API：ai.article / ai.visuals / ai.qa（auto=先用已配置的）。"""
+    group = PURPOSE_GROUP.get(purpose, "article")
+    sel = cfg.get(f"ai.{group}", "auto") if cfg else "auto"
+    if sel in ("openai", "anthropic"):
+        return [sel] + [x for x in ("openai", "anthropic") if x != sel]
+    from .creds import get_key
+    return (["openai", "anthropic"] if get_key("openai")
+            else ["anthropic", "openai"])
+
+
 def complete(cfg, con, video_id: str, system: str, user: str,
              max_tokens: int = 8000, purpose: str = "article") -> str:
-    """Try primary provider, fall back to the other. Records cost."""
-    primary = cfg.get("article.provider", "anthropic")
-    order = [primary] + [p for p in ("anthropic", "openai") if p != primary]
+    """Provider order decided per-purpose (ai.* routing); falls back. Records cost."""
+    order = _route(cfg, purpose)
     last: Exception | None = None
     for prov in order:
         model = cfg.get(f"article.model_{prov}", DEFAULT_MODELS[prov])

@@ -249,6 +249,79 @@ DOODLES = {
 }
 
 
+# 英文翻译层：中文渲染后按词典替换（覆盖全部主要界面文案）
+EN_MAP = [
+    ("设置 · 按处理流程", "Settings · by pipeline stage"),
+    ("一条视频从发现到进库要经过六个环节。下面按发生顺序排列：每段先讲这一步会发生什么，紧接着就是它的可调项。",
+     "Each video passes through six stages from discovery to your library. Sections below follow that order: what happens first, then its options."),
+    ("⓪ 语言 / Language", "⓪ Language / 语言"),
+    ("① 嗅探 · 发现新视频", "① Discover · find new videos"),
+    ("② 下载 · 拿到字幕或音频", "② Download · captions or audio"),
+    ("③ 转录 · 音频变文字", "③ Transcribe · audio to text"),
+    ("④ 整理 · AI 成文与配图", "④ Compose · AI article & screenshots"),
+    ("⑤ 阅读与保存 · 写入你的库", "⑤ Read & Save · into your library"),
+    ("⑥ AI · 凭证与分工", "⑥ AI · credentials & routing"),
+    ("运行模式", "Run mode"), ("发现新视频弹窗", "New-video dialog"),
+    ("单轮最多处理", "Max per run"), ("跳过短视频", "Skip shorts"),
+    ("转录方式", "Transcriber"), ("MacWhisper 超时", "MacWhisper timeout"),
+    ("守候回收", "Collect wait"), ("文章模式", "Article mode"),
+    ("原文附加", "Append original"), ("整理附加 Prompt", "Extra prompt"),
+    ("自动截图", "Auto screenshots"), ("图片密度", "density"),
+    ("保存模式", "Storage mode"), ("保存根目录", "Root folder"),
+    ("Reports 保存位置", "Reports folder"),
+    ("保存全部设置", "Save all settings"), ("保存 key", "Save keys"),
+    ("已配置", "configured"), ("未配置", "not set"),
+    ("处理进度", "Progress"), ("频道", "Channel"), ("标题", "Title"),
+    ("时长", "Length"), ("发布", "Published"), ("状态", "Status"),
+    ("详情", "Detail"), ("更新于", "Updated"),
+    ("立即运行（强制刷新数据）", "Run now (force refresh)"),
+    ("粘贴单个视频链接，直接处理…", "Paste a video link to process it…"),
+    ("＋添加", "＋Add"), ("重试", "Retry"), ("跳过", "Skip"),
+    ("已发现", "Found"), ("已探测", "Probed"), ("查字幕", "Captions?"),
+    ("下载音频", "Downloading"), ("MacWhisper 转录中", "Transcribing"),
+    ("文稿就绪", "Transcript ready"), ("文章已生成", "Article ready"),
+    ("规划截图", "Planning shots"), ("截图完成", "Shots ready"),
+    ("写入中", "Writing"), ("校验中", "Verifying"), ("完成", "Done"),
+    ("已跳过", "Skipped"), ("失败", "Failed"), ("放弃", "Given up"),
+    ("📖 阅读", "📖 Read"), ("📅 时间轴", "📅 Timeline"), ("🗂 管理", "🗂 Manage"),
+    ("搜索标题…", "Search titles…"), ("全部频道", "All channels"),
+    ("按日期分组", "Group by date"), ("按频道分组", "Group by channel"),
+    ("平铺列表", "Flat list"), ("标签：", "Tags: "),
+    ("回收站", "Trash"), ("保留 3 天后自动清除", "auto-purged after 3 days"),
+    ("恢复", "Restore"), ("全选", "Select all"),
+    ("删除所选（入回收站）", "Delete selected (to trash)"),
+    ("这里还什么都没有", "Nothing here yet"),
+    ("没有匹配的文章", "No matching articles"),
+    ("添加频道", "Add channel"), ("已订阅频道", "Subscribed channels"),
+    ("批量启用", "Enable selected"), ("批量停用", "Disable selected"),
+    ("批量删除", "Delete selected"), ("起始日期", "Since"),
+    ("启用", "On"), ("停用", "Off"), ("删除", "Delete"),
+    ("订阅该频道", "Subscribe"),
+    ("尚未配置 AI 密钥——文章生成与智能截图不可用。", "No AI key configured — article generation and smart screenshots are unavailable. "),
+    ("前往设置添加 →", "Add one in Settings →"),
+    ("刷新图片", "Reload images"), ("AI 重新总结", "Re-summarize"),
+    ("在 Obsidian 打开", "Open in Obsidian"), ("← 返回列表", "← Back"),
+    ("就这篇文章向 AI 提问（细节查询，基于完整原文回答）…", "Ask AI about this article (answers grounded in the full transcript)…"),
+    ("提问", "Ask"), ("💬 AI 回答", "💬 AI answer"),
+    ("软件更新 / Updates", "Updates / 软件更新"),
+    ("当前版本", "Current version"), ("检查更新", "Check for updates"),
+    ("从 GitHub 拉取最新版并自动重启", "Pull latest from GitHub and restart"),
+    ("已是最新版本", "Already up to date"),
+    ("个提交），正在后台拉取并重启——约半分钟后重新打开窗口即为新版",
+     " commits) — pulling and restarting in background; reopen the window in ~30s"),
+    ("发现更新（", "Update found ("),
+    ("检查更新失败（网络或 git 仓库问题）", "Update check failed (network or git issue)"),
+]
+
+
+def _tr(html: str) -> str:
+    if cfg_mod.load().get("app.language", "zh") != "en":
+        return html
+    for zh, en in EN_MAP:
+        html = html.replace(zh, en)
+    return html
+
+
 def _keys_ok() -> bool:
     return _key_status("openai") or _key_status("anthropic")
 
@@ -257,8 +330,8 @@ def page(title: str, page_id: str, body: str):
     if page_id != "settings" and not _keys_ok():
         body = ('<div class=banner>⚠️ 尚未配置 AI 密钥——文章生成与智能截图不可用。'
                 '<a href="/settings">前往设置添加 →</a></div>') + body
-    return render_template_string(BASE, title=title, page=page_id, body=body,
-                                  version=__version__)
+    return _tr(render_template_string(BASE, title=title, page=page_id,
+                                      body=body, version=__version__))
 
 
 def check_csrf():
@@ -451,6 +524,26 @@ def _run_busy() -> bool:
             return False
     except AlreadyRunning:
         return True
+
+
+@app.route("/update", methods=["POST"])
+def app_update():
+    check_csrf()
+    proj = Path(__file__).resolve().parents[2]
+    try:
+        subprocess.run(["git", "-C", str(proj), "fetch", "-q", "origin", "main"],
+                       capture_output=True, timeout=30)
+        r = subprocess.run(["git", "-C", str(proj), "rev-list",
+                            "HEAD..origin/main", "--count"],
+                           capture_output=True, text=True, timeout=10)
+        behind = int((r.stdout or "0").strip() or 0)
+    except Exception:
+        return redirect(url_for("settings", upd="err"))
+    if behind == 0:
+        return redirect(url_for("settings", upd="latest"))
+    script = proj / "app" / "scripts" / "self_update.sh"
+    subprocess.Popen(["/bin/bash", str(script)], start_new_session=True)
+    return redirect(url_for("settings", upd=f"pulling{behind}"))
 
 
 @app.route("/run-now", methods=["POST"])
@@ -1068,13 +1161,32 @@ def _key_status(name: str) -> bool:
 def settings():
     cfg = cfg_mod.load()
     msg = ""
+    upd = request.args.get("upd", "")
+    if upd == "latest":
+        msg = '<span class=ok>已是最新版本</span>'
+    elif upd.startswith("pulling"):
+        msg = ('<span class="st run">发现更新（' + escape(upd[7:])
+               + ' 个提交），正在后台拉取并重启——约半分钟后重新打开窗口即为新版</span>')
+    elif upd == "err":
+        msg = '<span class=bad>检查更新失败（网络或 git 仓库问题）</span>'
     if request.args.get("firstrun"):
         msg = ('<span class=bad>欢迎使用！请先在下方"API 凭证"中添加你自己的 '
                'AI 密钥（OpenAI 或 Anthropic 任一），添加后全部功能可用。</span>')
     if request.method == "POST":
         check_csrf()
         f = request.form
-        if f.get("form") == "keys":
+        if f.get("form") == "ai":
+            for grp in ("article", "visuals", "qa"):
+                v = f.get(f"ai_{grp}")
+                if v in ("auto", "openai", "anthropic"):
+                    cfg.data.setdefault("ai", {})[grp] = v
+            try:
+                cfg_mod.save(cfg)
+                msg = '<span class=ok>AI 分工已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = f'<span class=bad>{escape(str(e))}</span>'
+            cfg = cfg_mod.load()
+        elif f.get("form") == "keys":
             for prov in ("openai", "anthropic"):
                 val = f.get(f"key_{prov}", "").strip()
                 if val:
@@ -1091,6 +1203,8 @@ def settings():
             cfg.data.setdefault("scheduler", {})["hours"] = hours
             cfg.data["scheduler"]["confirm_dialog"] = f.get("confirm_dialog", "on_new_videos")
             cfg.data["discovery"]["review_gate"] = f.get("run_mode") == "confirm"
+            if f.get("language") in ("zh", "en"):
+                cfg.data.setdefault("app", {})["language"] = f["language"]
             cfg.data["scheduler"]["confirm_timeout_sec"] = int(f.get("timeout", 30))
             cfg.data["transcription"]["primary"] = f.get("primary", "macwhisper_watch_srt")
             cfg.data["article"]["mode"] = f.get("article_mode", "edited_article")
@@ -1157,6 +1271,21 @@ def settings():
 <p class=dim>一条视频从发现到进库要经过六个环节。下面按发生顺序排列：每段先讲这一步会发生什么，紧接着就是它的可调项。</p></div>
 <form method=post>
 <input type=hidden name=_csrf value={CSRF}>
+
+<div class=card><h3>⓪ 语言 / Language</h3>
+<table class=wrap>
+<tr><td>界面语言 / UI language</td><td><select name=language>
+<option value=zh {dsel('zh', cfg.get('app.language','zh'))}>中文</option>
+<option value=en {dsel('en', cfg.get('app.language','zh'))}>English</option>
+</select></td></tr>
+<tr><td>软件更新 / Updates</td><td>当前版本 v{__version__}
+ <button formaction=/update formmethod=post>🔄 检查更新</button>
+ <span class=dim>从 GitHub 拉取最新版并自动重启</span></td></tr>
+</table>
+<p class=dim>开始之前 / Before you start：<br>
+1. 先选择软件语言（保存后立即生效）/ Pick your UI language first — applies right after saving.<br>
+2. 本软件默认不内置任何 API key，需要你自己添加（见第 ⑥ 节）/ No API key ships by default — add your own in section ⑥.<br>
+3. 各 AI 环节可分别指定使用哪个 API（也在第 ⑥ 节）/ Each AI stage can use a different provider — also in section ⑥.</p></div>
 
 <div class=card><h3>① 嗅探 · 发现新视频</h3>
 <p class=dim>按排班表整点唤醒（睡眠错过的唤醒后合并补跑），逐个检查订阅频道的 RSS。发现新视频后：自动模式直接进入处理，确认模式先在 Queue 列出等你逐条确认——两种模式都能随时跳过单条。</p>
@@ -1236,8 +1365,27 @@ def settings():
 <p><button class=primary>保存全部设置</button></p></div>
 </form>
 
-<div class=card><h3>⑥ AI · 凭证与模型</h3>
-<p class=dim>整理成文、智能截图召回和"问 AI"都用你的密钥（直接写入 macOS 钥匙串，不经过配置文件）。任配一个即可运转，两个都配则自动互为备援。当前状态：
+<div class=card><h3>⑥ AI · 凭证与分工</h3>
+<p class=dim>本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。任配一个即可运转，两个都配则互为备援。下面可以给每个 AI 环节分别指定用哪家：</p>
+<form method=post style="margin-bottom:14px">
+<input type=hidden name=_csrf value={CSRF}>
+<input type=hidden name=form value=ai>
+<table class=wrap>
+<tr><td>整理成文用</td><td><select name=ai_article>
+<option value=auto {dsel('auto', cfg.get('ai.article','auto'))}>自动（用已配置的，优先 OpenAI）</option>
+<option value=openai {dsel('openai', cfg.get('ai.article','auto'))}>OpenAI</option>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.article','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<tr><td>截图召回用</td><td><select name=ai_visuals>
+<option value=auto {dsel('auto', cfg.get('ai.visuals','auto'))}>自动</option>
+<option value=openai {dsel('openai', cfg.get('ai.visuals','auto'))}>OpenAI</option>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<tr><td>问 AI 用</td><td><select name=ai_qa>
+<option value=auto {dsel('auto', cfg.get('ai.qa','auto'))}>自动</option>
+<option value=openai {dsel('openai', cfg.get('ai.qa','auto'))}>OpenAI</option>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.qa','auto'))}>Anthropic (Claude)</option></select></td></tr>
+</table>
+<p><button>保存分工</button></p></form>
+<p class=dim>密钥状态：
  openai {'<span class=ok>已配置</span>' if _key_status('openai') else '<span class=bad>未配置</span>'} ·
  anthropic {'<span class=ok>已配置</span>' if _key_status('anthropic') else '<span class=bad>未配置</span>'}</p>
 <form method=post>

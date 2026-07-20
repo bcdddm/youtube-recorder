@@ -311,6 +311,13 @@ EN_MAP = [
      " — updating and restarting in background; reopen the window in ~30s"),
     ("发现新版本 ", "New release found: "),
     ("检查更新失败（网络或 git 仓库问题）", "Update check failed (network or git issue)"),
+    ("原文保留比例", "Verbatim ratio"),
+    ("关闭（自由整理）", "Off (free rewrite)"), ("（推荐）", " (recommended)"),
+    ("（纯原文分节）", " (pure original, sectioned)"),
+    ("全部组", "All groups"), ("设为组", "Set group"), ("组名", "Group"),
+    ("🧾 总结", "🧾 Digest"), ("当日情报汇总", "Daily digest"),
+    ("← 返回时间轴", "← Back to timeline"),
+    ("没有可汇总的文章。", "No articles to digest."),
 ]
 
 
@@ -387,6 +394,12 @@ def channels():
             con.executemany("UPDATE channels SET enabled=0 WHERE channel_id=?",
                             [(i,) for i in ids]); con.commit()
             msg = f'<span class=ok>已停用 {len(ids)} 个频道</span>'
+        elif f.get("bulk") == "setgroup" and ids:
+            gname = f.get("grpname", "").strip()[:20]
+            con.executemany("UPDATE channels SET grp=? WHERE channel_id=?",
+                            [(gname, i) for i in ids]); con.commit()
+            msg = (f'<span class=ok>已把 {len(ids)} 个频道设为组'
+                   f'「{escape(gname) or "（无组）"}」</span>')
         elif f.get("bulk") == "delete" and ids:
             for i in ids:
                 _delete(i)
@@ -437,9 +450,15 @@ def channels():
                     + ("停用" if r["enabled"] else "启用") + "</button> "
                     + '<button name=act_del value=\'' + str(cid) + '\' '
                     + 'onclick="' + confirm_js + '">删除</button>')
+        try:
+            grp = r["grp"] or ""
+        except (KeyError, IndexError):
+            grp = ""
         parts.append(
             "<tr><td>" + chk + "</td>"
-            + "<td>" + str(escape(r["name"] or "")) + "</td>"
+            + "<td>" + str(escape(r["name"] or ""))
+            + (("<br><span class=chip style='margin-left:0'>" + str(escape(grp))
+                + "</span>") if grp else "") + "</td>"
             + "<td class=dim>" + str(cid) + "</td>"
             + "<td class=dim>" + str(escape((r["not_before"] or "")[:10])) + "</td>"
             + "<td>" + stbadge + "</td><td>" + acts + "</td></tr>")
@@ -482,6 +501,8 @@ def channels():
 <button name=bulk value=disable>批量停用</button>
 <button name=bulk value=delete
  onclick="return confirm('批量删除所选频道？已生成的文章会保留（归入手动添加）。')">批量删除</button>
+<span style="margin-left:12px">组名 <input name=grpname size=8 placeholder="如 财经">
+<button name=bulk value=setgroup>设为组</button></span>
 </div>
 <table><tr><th></th><th>名称</th><th>ID</th><th>起始日期</th><th>状态</th><th></th></tr>
 {rows or '<tr><td colspan=6 class=dim>暂无</td></tr>'}</table>
@@ -830,7 +851,7 @@ def reports_json():
     con = _con()
     rows = con.execute(
         "SELECT w.video_id, MAX(w.at) at, w.note_path, v.title vtitle, "
-        "v.published_at, v.duration_sec, c.name cname "
+        "v.published_at, v.duration_sec, c.name cname, c.grp cgrp "
         "FROM writes w JOIN videos v USING(video_id) "
         "LEFT JOIN channels c USING(channel_id) "
         "WHERE w.note_kind='wiki' GROUP BY w.video_id ORDER BY w.at DESC").fetchall()
@@ -853,10 +874,78 @@ def reports_json():
             "generated": r["at"][:10],
             "duration_sec": r["duration_sec"] or 0,
             "tags": tags,
+            "grp": (r["cgrp"] or "") if "cgrp" in r.keys() else "",
         })
     con.close()
     from flask import jsonify
     return jsonify(out)
+
+
+DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视频文章的元信息
+（标题/频道/摘要/要点）。输出当日汇总报告（Markdown）：
+# 当日情报汇总（{date}）
+先写 3-5 句总览；然后按主题归并要点（每条标注来源视频标题）；
+最后一节"值得注意"：各来源间的分歧观点或共同强调的信号。
+只依据给定材料，不补充外部信息。"""
+
+
+@app.route("/reports/digest", methods=["POST"])
+def reports_digest():
+    check_csrf()
+    date = request.form.get("date", "")[:10]
+    grp = request.form.get("grp", "").strip()
+    con = _con()
+    rows = con.execute(
+        "SELECT w.video_id, w.note_path, v.title, v.published_at, "
+        "c.name cname, c.grp cgrp "
+        "FROM writes w JOIN videos v USING(video_id) "
+        "LEFT JOIN channels c USING(channel_id) "
+        "WHERE w.note_kind='wiki' GROUP BY w.video_id").fetchall()
+    import json as _json
+    from .paths import work_dir
+    items = []
+    for r in rows:
+        day = (r["published_at"] or r["note_path"] or "")[:10]
+        if (r["published_at"] or "")[:10] != date:
+            continue
+        if grp and (r["cgrp"] or "") != grp:
+            continue
+        meta = {}
+        aj = work_dir(r["video_id"]) / "article.json"
+        try:
+            if aj.exists():
+                meta = _json.loads(aj.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        items.append({
+            "title": meta.get("title_zh") or r["title"] or r["video_id"],
+            "channel": r["cname"] or "",
+            "summary": meta.get("summary", ""),
+            "takeaways": meta.get("takeaways", [])[:6],
+        })
+    con.close()
+    if not items:
+        body = ('<div class=card><a class=dim href="/reports">← 返回</a>'
+                '<p class=dim>该日期（' + escape(date) + '）'
+                + (('组「' + escape(grp) + '」') if grp else '')
+                + '没有可汇总的文章。</p></div>')
+        return page("日报", "reports", body)
+    from . import providers
+    import json as _j
+    user = _j.dumps(items, ensure_ascii=False)[:40000]
+    try:
+        md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
+                                DIGEST_SYSTEM.format(date=date), user,
+                                max_tokens=3000, purpose="report_qa")
+    except Exception as e:
+        md = f"生成失败：{e}"
+    html = _md_to_html(md, "digest")
+    scope = ('组「' + str(escape(grp)) + '」 · ') if grp else ""
+    body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
+            f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
+            f' · 共 {len(items)} 篇</span>'
+            f'<div class=md>{html}</div></div>')
+    return page("日报", "reports", body)
 
 
 @app.route("/reports/bulk-delete", methods=["POST"])
@@ -874,13 +963,14 @@ def reports_bulk_delete():
 
 _REPORTS_TMPL = """
 <div class=tabs>
-<button data-m=read class=on>📖 阅读</button>
-<button data-m=timeline>📅 时间轴</button>
+<button data-m=timeline class=on>📅 时间轴</button>
+<button data-m=read>📖 阅读</button>
 <button data-m=manage>🗂 管理</button>
 </div>
 <div class=card style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
 <input id=q placeholder="搜索标题…" style="flex:1;min-width:180px" oninput="render()">
 <select id=chan onchange="render()"><option value="">全部频道</option></select>
+<select id=grpsel onchange="render()"><option value="">全部组</option></select>
 <select id=grp onchange="render()">
 <option value=date>按日期分组</option>
 <option value=channel>按频道分组</option>
@@ -894,15 +984,17 @@ _REPORTS_TMPL = """
 <div id=dd-empty style="display:none"><div class=empty>__DOODLE__这里还什么都没有</div></div>
 <script>
 const CSRF_T = "__CSRF__";
-let DATA = [], MODE = 'read', TAG = null;
+let DATA = [], MODE = 'timeline', TAG = null;
 function esc(s) { return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
 function dur(s) { if(!s) return ''; const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
   return h? h+'小时'+m+'分' : m+'分钟'; }
 function filtered() {
   const q = document.getElementById('q').value.toLowerCase();
   const ch = document.getElementById('chan').value;
+  const gsel = document.getElementById('grpsel').value;
   return DATA.filter(r => (!q || r.title.toLowerCase().includes(q) || r.channel.toLowerCase().includes(q))
                        && (!ch || r.channel === ch)
+                       && (!gsel || (r.grp||'') === gsel)
                        && (!TAG || (r.tags||[]).includes(TAG)));
 }
 function tagsHtml(r) {
@@ -938,7 +1030,9 @@ function renderTimeline(rows) {
     (groups[k] = groups[k]||[]).push(r); });
   const keys = Object.keys(groups).sort();   // 时间轴从左到右：旧 → 新
   if (!keys.length) return '';
-  const inner = keys.map(k => `<div class=tlgroup><div class=tldate>${esc(k.slice(5) || k)}</div>
+  const inner = keys.map(k => `<div class=tlgroup><div class=tldate>${esc(k.slice(5) || k)}
+      <button style="font-size:11px;padding:1px 7px;margin-left:4px" title="总结当天全部内容"
+       onclick="digest('${esc(k)}')">🧾 总结</button></div>
     ${groups[k].map(r=>`<div class=tlcard><a href="/reports/${esc(r.video_id)}" title="${esc(r.title)}"><div class=clamp>${esc(r.title)}</div></a>
       <div class=m>${esc(r.channel)} · ${dur(r.duration_sec)}</div></div>`).join('')}
     </div>`).join('');
@@ -956,6 +1050,14 @@ function renderManage(rows) {
     <td class=dim>${esc(r.channel)}</td><td class=dim>${esc(r.published)}</td>
     <td class=dim>${esc(r.generated)}</td></tr>`).join('');
   return `<div class=card>${head}${body}</table></div>`;
+}
+function digest(d) {
+  const gsel = document.getElementById('grpsel').value;
+  const f = document.createElement('form'); f.method='post'; f.action='/reports/digest';
+  f.innerHTML = `<input type=hidden name=_csrf value="${CSRF_T}">
+    <input type=hidden name=date value="${d}">
+    <input type=hidden name=grp value="${gsel}">`;
+  document.body.appendChild(f); f.submit();
 }
 function bulkDelete() {
   const ids = [...document.querySelectorAll('.mgc:checked')].map(c=>c.value);
@@ -990,6 +1092,10 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   const chans = [...new Set(DATA.map(r=>r.channel))].sort();
   document.getElementById('chan').innerHTML =
     '<option value="">全部频道</option>' + chans.map(c=>`<option>${esc(c)}</option>`).join('');
+  const grps = [...new Set(DATA.map(r=>r.grp).filter(Boolean))].sort();
+  const gs = document.getElementById('grpsel');
+  gs.style.display = grps.length ? '' : 'none';
+  gs.innerHTML = '<option value="">全部组</option>' + grps.map(g=>`<option>${esc(g)}</option>`).join('');
   render();
   const trash = await (await fetch('/trash.json')).json();
   if (trash.length) {
@@ -1219,6 +1325,12 @@ def settings():
             cfg.data["article"]["mode"] = f.get("article_mode", "edited_article")
             cfg.data["article"]["custom_prompt"] = f.get("custom_prompt", "").strip()
             cfg.data["article"]["append_original"] = f.get("append_original") == "1"
+            try:
+                vp = int(f.get("verbatim_pct", 70))
+                if vp in (0, 50, 60, 70, 80, 90, 100):
+                    cfg.data["article"]["verbatim_pct"] = vp
+            except (TypeError, ValueError):
+                pass
             cfg.data["visuals"]["image_density"] = int(f.get("density", 3))
             cfg.data["visuals"]["enabled"] = f.get("visuals_on") == "1"
             cfg.data["vault"]["root"] = f.get("vault_root", "").strip()
@@ -1339,6 +1451,17 @@ def settings():
 <tr><td>文章模式</td><td><select name=article_mode>
 <option value=edited_article {dsel('edited_article',am)}>整理成文（重组结构）</option>
 <option value=faithful_cleanup {dsel('faithful_cleanup',am)}>忠实清稿（只去口头禅）</option></select></td></tr>
+<tr><td>原文保留比例</td><td><select name=verbatim_pct>
+<option value=0 {dsel(0, cfg.get('article.verbatim_pct',70))}>关闭（自由整理）</option>
+<option value=50 {dsel(50, cfg.get('article.verbatim_pct',70))}>50%</option>
+<option value=60 {dsel(60, cfg.get('article.verbatim_pct',70))}>60%</option>
+<option value=70 {dsel(70, cfg.get('article.verbatim_pct',70))}>70%（推荐）</option>
+<option value=80 {dsel(80, cfg.get('article.verbatim_pct',70))}>80%</option>
+<option value=90 {dsel(90, cfg.get('article.verbatim_pct',70))}>90%</option>
+<option value=100 {dsel(100, cfg.get('article.verbatim_pct',70))}>100%（纯原文分节）</option>
+</select>
+<p class=dim>硬约束：正文中至少该比例的字符逐字来自原文（AI 只负责选句和过渡，
+被选句子由程序原样拷贝，不足自动补齐；实测值写入文章 frontmatter）。</p></td></tr>
 <tr><td>原文附加</td><td><label><input type=checkbox name=append_original value=1
  {'checked' if cfg.get('article.append_original', True) else ''}>
  AI 改写在前，完整原文以可折叠块附在文末（Obsidian 中默认收起）</label></td></tr>

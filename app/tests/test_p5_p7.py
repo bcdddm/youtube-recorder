@@ -56,6 +56,7 @@ class _FakeCfg:
     def __init__(self, root):  self.root = root
     def get(self, k, d=None):
         return {"article.mode": "edited_article",
+                "article.verbatim_pct": 0,  # 该测试验证自由整理路径
                 "article.provider": "anthropic",
                 "vault.raw_subdir": "20-Raw/YouTube",
                 "vault.wiki_subdir": "30-Wiki"}.get(k, d)

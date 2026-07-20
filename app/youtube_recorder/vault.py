@@ -180,7 +180,7 @@ sources:
     url: {video_url}
     title: "{safe_name(video_title)}"
 mode: {art.get('_mode', 'edited_article')}
-generator: "{BRANDING}"
+{("verbatim: " + str(int(art["verbatim_ratio"] * 100)) + "% (target " + str(art.get("verbatim_pct", "?")) + "%)" + chr(10)) if art.get("verbatim_ratio") is not None else ""}generator: "{BRANDING}"
 ---
 
 # {art['title_zh']}

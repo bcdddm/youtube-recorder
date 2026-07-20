@@ -13,7 +13,7 @@ from pathlib import Path
 from .paths import DB_FILE
 from . import state as st
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -144,6 +144,12 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE videos ADD COLUMN src_channel_id TEXT")
         con.execute("ALTER TABLE videos ADD COLUMN src_channel_name TEXT")
         con.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+        con.commit()
+    # v4: 频道分组
+    ccols = {r["name"] for r in con.execute("PRAGMA table_info(channels)")}
+    if "grp" not in ccols:
+        con.execute("ALTER TABLE channels ADD COLUMN grp TEXT DEFAULT ''")
+        con.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
         con.commit()
 
 

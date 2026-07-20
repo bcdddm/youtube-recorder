@@ -140,11 +140,120 @@ def compose_article(cfg, con, video_id: str, video_title: str,
     return art
 
 
+SELECT_SYSTEM = """你是选句编辑。给你一段视频口述稿的带编号句子。
+任务：挑选要"逐字保留"的句子（目标约占本段字符的 {pct}%），优先保留：
+含具体数字/点位/结论的句子、论证链完整的连续句。选中的句子会被程序原样拷贝，
+你不改写它们。另外给本段起一个小标题，并写一句不超过 30 字的过渡（不复述内容）。
+输出 JSON：{{"heading": "小标题", "bridge": "过渡一句", "keep": ["s0001","s0002",...]}}
+只输出 JSON。"""
+
+META_SYSTEM = """根据文章的章节标题与摘句样本，生成元信息。不得编造材料外的事实。
+输出 JSON：{"title_zh":"15字内标题","aliases":["别名"],"one_sentence":"一句话",
+"summary":"3-5句摘要","takeaways":["要点"...],"tags":["标签",最多6个]}
+只输出 JSON。"""
+
+
+def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
+    """选句式生成：AI 只挑句+写过渡，原句程序拷贝 → 保留率硬保证。"""
+    seg_by_id = {s.segment_id: s for s in can.segments}
+    sections = []
+    for c in chunks:
+        seg_ids = []
+        cur = False
+        for seg in can.segments:
+            if seg.segment_id == c.first_segment:
+                cur = True
+            if cur:
+                seg_ids.append(seg.segment_id)
+            if seg.segment_id == c.last_segment:
+                break
+        lines = "\n".join(f"{sid}: {seg_by_id[sid].text}" for sid in seg_ids)
+        try:
+            reply = providers.complete(
+                cfg, con, video_id, SELECT_SYSTEM.format(pct=pct),
+                lines[:14000], max_tokens=1500, purpose="chunk_notes")
+            sel = providers.extract_json(reply)
+        except Exception:
+            sel = {"heading": "", "bridge": "", "keep": seg_ids}
+        keep = [k for k in sel.get("keep", []) if k in seg_by_id and k in seg_ids]
+        if not keep:
+            keep = seg_ids[: max(1, len(seg_ids) // 2)]
+        sections.append({
+            "heading": (sel.get("heading") or f"片段 {c.chunk_id + 1}")[:30],
+            "bridge": ("" if pct >= 100 else (sel.get("bridge") or "")[:40]),
+            "keep": keep, "all_ids": seg_ids,
+            "source_chunk_ids": [c.chunk_id],
+        })
+
+    def measure():
+        q = sum(len(seg_by_id[k].text) for sec in sections for k in sec["keep"])
+        b = sum(len(sec["bridge"]) for sec in sections)
+        total = q + b
+        return (q / total if total else 1.0), q, b
+
+    # 硬约束强制：不足则按顺序补选未保留的原句，直到达标
+    ratio, _, _ = measure()
+    target = pct / 100.0
+    guard = 0
+    while ratio < target and guard < 10000:
+        added = False
+        for sec in sections:
+            extra = [i for i in sec["all_ids"] if i not in sec["keep"]]
+            if extra:
+                nxt = extra[0]
+                pos = sec["all_ids"].index(nxt)
+                sec["keep"] = sorted(set(sec["keep"]) | {nxt},
+                                     key=sec["all_ids"].index)
+                added = True
+                ratio, _, _ = measure()
+                if ratio >= target:
+                    break
+        if not added:  # 已全部保留仍不达标 → 去掉过渡句
+            for sec in sections:
+                sec["bridge"] = ""
+            ratio, _, _ = measure()
+            break
+        guard += 1
+
+    out = []
+    for sec in sections:
+        quote = "".join(seg_by_id[k].text for k in sec["keep"])
+        body = (sec["bridge"] + "\n\n" + quote) if sec["bridge"] else quote
+        out.append({"heading": sec["heading"], "body": body,
+                    "source_chunk_ids": sec["source_chunk_ids"]})
+    ratio, q, b = measure()
+    return out, round(ratio, 3)
+
+
 def generate(cfg, con, video_id: str, can: Canonical,
              video_title: str, channel: str) -> dict:
     chunks = chunk_transcript(can)
-    notes = analyze_chunks(cfg, con, video_id, chunks)
-    art = compose_article(cfg, con, video_id, video_title, channel, notes)
+    pct = int(cfg.get("article.verbatim_pct", 70) or 0)
+    if pct >= 50:
+        sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct)
+        sample = "\n".join(
+            f"## {s['heading']}\n{s['body'][:200]}" for s in sections)[:8000]
+        try:
+            reply = providers.complete(cfg, con, video_id, META_SYSTEM,
+                                       f"视频标题：{video_title}\n频道：{channel}\n\n"
+                                       + sample, max_tokens=1500, purpose="compose")
+            meta = providers.extract_json(reply)
+        except Exception:
+            meta = {}
+        art = {
+            "title_zh": (meta.get("title_zh") or video_title)[:40],
+            "aliases": meta.get("aliases", []),
+            "one_sentence": meta.get("one_sentence", ""),
+            "summary": meta.get("summary", ""),
+            "sections": sections,
+            "takeaways": meta.get("takeaways", []),
+            "tags": meta.get("tags", []),
+            "verbatim_pct": pct,
+            "verbatim_ratio": ratio,
+        }
+    else:
+        notes = analyze_chunks(cfg, con, video_id, chunks)
+        art = compose_article(cfg, con, video_id, video_title, channel, notes)
     art["_chunks"] = [c.__dict__ | {"text": None} for c in chunks]  # traceability
     art["_mode"] = cfg.get("article.mode", "edited_article")
     return art

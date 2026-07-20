@@ -7,6 +7,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from pathlib import Path
 
 from . import BRANDING
 
@@ -34,7 +35,27 @@ def main() -> int:
                 break
             time.sleep(0.25)
 
+    _set_dock_icon()
     webview.create_window(BRANDING, f"http://{HOST}:{PORT}",
                           width=1120, height=820, min_size=(860, 600))
     webview.start()  # blocks until window closed
     return 0
+
+
+def _set_dock_icon() -> None:
+    """裸 Python 进程在 Dock 会显示 Python 火箭图标——运行时替换为本应用图标。"""
+    candidates = [
+        "/Applications/YouTube Recorder.app/Contents/Resources/AppIcon.icns",
+        str(Path(__file__).resolve().parents[2]
+            / "YouTube Recorder.app/Contents/Resources/AppIcon.icns"),
+    ]
+    try:
+        from AppKit import NSApplication, NSImage  # pyobjc（随 pywebview 安装）
+        for p in candidates:
+            if Path(p).exists():
+                img = NSImage.alloc().initWithContentsOfFile_(p)
+                if img:
+                    NSApplication.sharedApplication().setApplicationIconImage_(img)
+                return
+    except Exception:
+        pass  # 图标失败不影响功能

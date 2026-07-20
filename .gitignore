@@ -1,0 +1,14 @@
+# 运行时/构建产物
+__pycache__/
+*.pyc
+.DS_Store
+*.app/
+
+# 监视文件夹与音频/转录样本（含 YouTube 内容，不入库）
+macwhisper-inbox/
+macwhisper-outbox/
+spike-results/
+
+# 本地临时
+*.log
+*.tmp

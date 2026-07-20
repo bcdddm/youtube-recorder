@@ -1,0 +1,23 @@
+[project]
+name = "youtube-recorder"
+version = "0.3.5"
+description = "YouTube Recorder - YouTube subscription discovery, transcription orchestration and Obsidian ingestion. By Leoluchino."
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "certifi",
+]
+
+[project.optional-dependencies]
+pipeline = ["yt-dlp>=2026.1.1"]
+ai = ["anthropic>=0.40", "openai>=1.50"]
+
+[project.scripts]
+ytrec = "youtube_recorder.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["youtube_recorder*"]

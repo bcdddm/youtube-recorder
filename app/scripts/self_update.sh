@@ -9,11 +9,11 @@ LOG=/tmp/ytrec-update.log
   echo "== self-update $(date) =="
   cd "$PROJ"
   sleep 1
-  git fetch -q origin main
-  BEHIND=$(git rev-list HEAD..origin/main --count)
-  echo "behind: $BEHIND"
-  [ "$BEHIND" = "0" ] && exit 0
-  git pull -q --ff-only origin main
+  TAG="$1"
+  [ -z "$TAG" ] && { echo "no tag given"; exit 1; }
+  git fetch -q --tags origin
+  echo "checking out release $TAG"
+  git checkout -q "tags/$TAG"
   chmod +x app/scripts/build_app.sh
   app/scripts/build_app.sh
   pkill -f 'youtube_recorder.cli tray' 2>/dev/null || true

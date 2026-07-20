@@ -305,11 +305,11 @@ EN_MAP = [
     ("提问", "Ask"), ("💬 AI 回答", "💬 AI answer"),
     ("软件更新 / Updates", "Updates / 软件更新"),
     ("当前版本", "Current version"), ("检查更新", "Check for updates"),
-    ("从 GitHub 拉取最新版并自动重启", "Pull latest from GitHub and restart"),
+    ("按 GitHub Release 版本更新（未发布的提交不会推送）", "Pull latest from GitHub and restart"),
     ("已是最新版本", "Already up to date"),
-    ("个提交），正在后台拉取并重启——约半分钟后重新打开窗口即为新版",
-     " commits) — pulling and restarting in background; reopen the window in ~30s"),
-    ("发现更新（", "Update found ("),
+    ("，正在后台更新并重启——约半分钟后重新打开窗口即为新版",
+     " — updating and restarting in background; reopen the window in ~30s"),
+    ("发现新版本 ", "New release found: "),
     ("检查更新失败（网络或 git 仓库问题）", "Update check failed (network or git issue)"),
 ]
 
@@ -526,24 +526,33 @@ def _run_busy() -> bool:
         return True
 
 
+def _ver_tuple(v: str) -> tuple:
+    import re as _re
+    nums = _re.findall(r"\d+", v or "")
+    return tuple(int(n) for n in nums[:3]) or (0,)
+
+
 @app.route("/update", methods=["POST"])
 def app_update():
+    """按已发布的 Release 标签更新：只有打了 vX.Y.Z tag 并发布的版本
+    才会推送给用户；main 上未发布的提交不触发更新。"""
     check_csrf()
     proj = Path(__file__).resolve().parents[2]
     try:
-        subprocess.run(["git", "-C", str(proj), "fetch", "-q", "origin", "main"],
-                       capture_output=True, timeout=30)
-        r = subprocess.run(["git", "-C", str(proj), "rev-list",
-                            "HEAD..origin/main", "--count"],
-                           capture_output=True, text=True, timeout=10)
-        behind = int((r.stdout or "0").strip() or 0)
+        r = subprocess.run(["git", "-C", str(proj), "ls-remote", "--tags",
+                            "origin"], capture_output=True, text=True, timeout=30)
+        tags = [line.rsplit("refs/tags/", 1)[-1].replace("^{}", "")
+                for line in r.stdout.splitlines() if "refs/tags/v" in line]
+        if not tags:
+            return redirect(url_for("settings", upd="latest"))
+        latest = max(set(tags), key=_ver_tuple)
     except Exception:
         return redirect(url_for("settings", upd="err"))
-    if behind == 0:
+    if _ver_tuple(latest) <= _ver_tuple(__version__):
         return redirect(url_for("settings", upd="latest"))
     script = proj / "app" / "scripts" / "self_update.sh"
-    subprocess.Popen(["/bin/bash", str(script)], start_new_session=True)
-    return redirect(url_for("settings", upd=f"pulling{behind}"))
+    subprocess.Popen(["/bin/bash", str(script), latest], start_new_session=True)
+    return redirect(url_for("settings", upd=f"pulling{latest}"))
 
 
 @app.route("/run-now", methods=["POST"])
@@ -1165,8 +1174,8 @@ def settings():
     if upd == "latest":
         msg = '<span class=ok>已是最新版本</span>'
     elif upd.startswith("pulling"):
-        msg = ('<span class="st run">发现更新（' + escape(upd[7:])
-               + ' 个提交），正在后台拉取并重启——约半分钟后重新打开窗口即为新版</span>')
+        msg = ('<span class="st run">发现新版本 ' + escape(upd[7:])
+               + '，正在后台更新并重启——约半分钟后重新打开窗口即为新版</span>')
     elif upd == "err":
         msg = '<span class=bad>检查更新失败（网络或 git 仓库问题）</span>'
     if request.args.get("firstrun"):
@@ -1280,7 +1289,7 @@ def settings():
 </select></td></tr>
 <tr><td>软件更新 / Updates</td><td>当前版本 v{__version__}
  <button formaction=/update formmethod=post>🔄 检查更新</button>
- <span class=dim>从 GitHub 拉取最新版并自动重启</span></td></tr>
+ <span class=dim>按 GitHub Release 版本更新（未发布的提交不会推送）</span></td></tr>
 </table>
 <p class=dim>开始之前 / Before you start：<br>
 1. 先选择软件语言（保存后立即生效）/ Pick your UI language first — applies right after saving.<br>

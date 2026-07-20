@@ -487,6 +487,13 @@ EN_MAP = [
     ('归并中…（AI 分析全部标签）', 'Merging… (AI analyzing all tags)'),
     ('已合并 ${d.merged} 个同义标签（共 ${d.total} 个）', 'Merged ${d.merged} similar tags (of ${d.total})'),
     ('归并失败', 'Merge failed'),
+    ('⬇ 导出订阅', '⬇ Export subscriptions'),
+    ('⬆ 导入订阅', '⬆ Import subscriptions'),
+    ('导出含分组/启停/起始日期；导入按频道合并，不会重复添加', 'Export includes groups, enabled state and start dates; import merges by channel — never duplicates'),
+    ('导入完成：新增 ', 'Import done: added '),
+    (' 个频道，合并 ', ' channel(s), merged groups for '),
+    (' 个频道的组', ' channel(s)'),
+    ('导入失败：文件不是有效的订阅导出 JSON', 'Import failed: not a valid subscriptions export JSON'),
 ]
 
 
@@ -528,10 +535,88 @@ def index():
     return redirect(url_for("channels"))
 
 
+@app.get("/channels/export")
+def channels_export():
+    con = _con()
+    chans = []
+    for r in dbm.list_channels(con):
+        if r["channel_id"] == MANUAL_CHANNEL:
+            continue
+        chans.append({
+            "channel_id": r["channel_id"], "url": r["url"], "name": r["name"],
+            "enabled": bool(r["enabled"]), "not_before": r["not_before"],
+            "groups": _grps_of(r["grp"] if "grp" in r.keys() else ""),
+        })
+    con.close()
+    import json as _j
+    from flask import Response
+    body = _j.dumps({"app": "YouTube Recorder", "kind": "channel-subscriptions",
+                     "version": 1, "exported_at": dbm.now(), "channels": chans},
+                    ensure_ascii=False, indent=1)
+    return Response(body, mimetype="application/json", headers={
+        "Content-Disposition":
+            'attachment; filename="youtube-recorder-channels-'
+            + dbm.now()[:10] + '.json"'})
+
+
+@app.post("/channels/import")
+def channels_import():
+    check_csrf()
+    import json as _j
+    up = request.files.get("file")
+    try:
+        data = _j.loads(up.read().decode("utf-8"))
+        chans = data.get("channels")
+        assert isinstance(chans, list)
+    except Exception:
+        return redirect("/channels?imp=bad")
+    con = _con()
+    added = merged = 0
+    for c in chans:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("channel_id") or "").strip()
+        if not cid.startswith("UC") or len(cid) > 40:
+            continue
+        url = str(c.get("url") or "https://www.youtube.com/channel/" + cid)[:300]
+        name = str(c.get("name") or "")[:120] or None
+        grps = [g.strip() for g in (c.get("groups") or [])
+                if isinstance(g, str) and g.strip()][:20]
+        row = con.execute("SELECT grp, name FROM channels WHERE channel_id=?",
+                          (cid,)).fetchone()
+        if row is None:
+            nb = c.get("not_before")
+            dbm.add_channel(con, cid, url, name,
+                            not_before=nb if isinstance(nb, str) else None)
+            if grps:
+                con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
+                            (_grps_join(grps), cid))
+            if c.get("enabled") is False:
+                con.execute("UPDATE channels SET enabled=0 WHERE channel_id=?", (cid,))
+            added += 1
+        else:
+            old = _grps_join(_grps_of(row["grp"]))
+            new = _grps_join(_grps_of(row["grp"]) + grps)
+            if new != old:
+                con.execute("UPDATE channels SET grp=? WHERE channel_id=?", (new, cid))
+                merged += 1
+            if name and not row["name"]:
+                con.execute("UPDATE channels SET name=? WHERE channel_id=?", (name, cid))
+    con.commit()
+    con.close()
+    return redirect("/channels?imp=ok&added=" + str(added) + "&merged=" + str(merged))
+
+
 @app.route("/channels", methods=["GET", "POST"])
 def channels():
     con = _con()
     msg = ""
+    if request.args.get("imp") == "ok":
+        msg = ('<span class=ok>导入完成：新增 ' + str(int(request.args.get("added", 0)))
+               + ' 个频道，合并 ' + str(int(request.args.get("merged", 0)))
+               + ' 个频道的组</span>')
+    elif request.args.get("imp") == "bad":
+        msg = '<span class=bad>导入失败：文件不是有效的订阅导出 JSON</span>'
     if request.method == "POST":
         check_csrf()
         f = request.form
@@ -711,6 +796,15 @@ def channels():
 <button class=primary>添加</button></form>
 <p class=dim>日期留空 = 从添加时刻起只收新视频，不回填历史。</p></div>
 <div class=card><h3>已订阅频道</h3>
+<div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<button type=button onclick="location.href='/channels/export'">⬇ 导出订阅</button>
+<form method=post action=/channels/import enctype="multipart/form-data"
+ style="display:flex;gap:6px;align-items:center;margin:0">
+<input type=hidden name=_csrf value={CSRF}>
+<input type=file name=file accept=".json" required style="font-size:12px;max-width:240px">
+<button>⬆ 导入订阅</button></form>
+<span class=dim>导出含分组/启停/起始日期；导入按频道合并，不会重复添加</span>
+</div>
 <form method=post>
 <input type=hidden name=_csrf value={CSRF}>
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">

@@ -89,3 +89,41 @@ def test_tag_merge_helpers():
     assert gui._merge_tags(["AI 投资", "财报季", "财报分析"], tmap) == ["AI", "财报"]
     assert gui._merge_tags([], tmap) == []
     assert gui._merge_tags(["新能源"], {}) == ["新能源"]
+
+
+def test_channels_export_import_roundtrip():
+    import json, io, os, tempfile
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    con = gui._con()
+    con.execute("DELETE FROM channels")
+    dbm.add_channel(con, "UCtestexport00000000001", "https://www.youtube.com/channel/UCtestexport00000000001", "测试频道A")
+    con.execute("UPDATE channels SET grp='投资,科技' WHERE channel_id='UCtestexport00000000001'")
+    con.commit(); con.close()
+    cli = gui.app.test_client()
+    # export
+    r = cli.get("/channels/export")
+    assert r.status_code == 200 and "attachment" in r.headers["Content-Disposition"]
+    data = json.loads(r.get_data(as_text=True))
+    assert data["kind"] == "channel-subscriptions"
+    ch = [c for c in data["channels"] if c["channel_id"] == "UCtestexport00000000001"][0]
+    assert ch["groups"] == ["投资", "科技"] and ch["enabled"] is True
+    # import: new channel + merge groups into existing
+    payload = {"kind": "channel-subscriptions", "version": 1, "channels": [
+        {"channel_id": "UCtestimport0000000002", "url": "", "name": "测试频道B",
+         "enabled": False, "groups": ["新闻"]},
+        {"channel_id": "UCtestexport00000000001", "groups": ["宏观"]},
+        {"channel_id": "bogus"},
+    ]}
+    body = {"_csrf": gui.CSRF,
+            "file": (io.BytesIO(json.dumps(payload, ensure_ascii=False).encode()), "subs.json")}
+    r = cli.post("/channels/import", data=body, content_type="multipart/form-data")
+    assert r.status_code == 302 and "imp=ok" in r.headers["Location"]
+    assert "added=1" in r.headers["Location"] and "merged=1" in r.headers["Location"]
+    con = gui._con()
+    b = con.execute("SELECT * FROM channels WHERE channel_id='UCtestimport0000000002'").fetchone()
+    assert b is not None and b["enabled"] == 0 and b["grp"] == "新闻"
+    a = con.execute("SELECT grp FROM channels WHERE channel_id='UCtestexport00000000001'").fetchone()
+    assert set(gui._grps_of(a["grp"])) == {"投资", "科技", "宏观"}
+    assert con.execute("SELECT COUNT(*) n FROM channels WHERE channel_id='bogus'").fetchone()["n"] == 0
+    con.close()

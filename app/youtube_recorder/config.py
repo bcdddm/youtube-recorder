@@ -26,7 +26,7 @@ VALID_DIALOG_POLICY = ("on_new_videos", "always", "never")
 VALID_ON_DIALOG_ERROR = ("run", "skip")
 VALID_LAYOUTS = ("vault", "folder_split", "folder_flat")
 VALID_LANGS = ("zh", "en")
-VALID_AI_ROUTES = ("auto", "openai", "anthropic")
+VALID_AI_ROUTES = ("auto", "openai", "anthropic", "claude_cli", "ollama")
 
 
 class ConfigError(ValueError):
@@ -36,7 +36,8 @@ class ConfigError(ValueError):
 DEFAULT_CONFIG: dict[str, Any] = {
     "app": {"name": APP_NAME, "branding": AUTHOR,
             "language": "zh"},  # zh | en
-    "ai": {  # 各环节分别用哪家 API：auto=用已配置的（都配了优先 OpenAI）
+    "ai": {  # 各环节分别用哪个渠道：auto=用已配置的 API（都配了优先 OpenAI）
+        # 可选：auto | openai | anthropic | claude_cli(本机 Claude Code 订阅) | ollama(本地)
         "article": "auto",   # 整理成文
         "visuals": "auto",   # 截图智能召回
         "qa": "auto",        # 报告内问答

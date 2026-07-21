@@ -394,7 +394,7 @@ EN_MAP = [
     ('Obsidian 库根目录，或任意目标文件夹', 'Obsidian vault root, or any target folder'),
     ('相对根目录，如 30-Wiki', 'Relative to root, e.g. 30-Wiki'),
     ('修改时把现有文章迁移过去', 'Migrate existing articles when changed'),
-    ('本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。任配一个即可运转，两个都配则互为备援。下面可以给每个 AI 环节分别指定用哪家：', 'No API key ships with this app — you add your own, stored directly in the macOS Keychain, never in config files. Either provider alone works; with both configured they back each other up. Assign a provider per AI stage below:'),
+    ('本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。除 API 外还支持两条本机渠道：Claude Code CLI（走你的 Claude 订阅额度，零 API 费）和 Ollama（本地模型，免费离线）。任一渠道可用即可运转，选了本机渠道失败时自动回落到已配置的 API。下面可以给每个 AI 环节分别指定用哪个渠道：', 'No API key ships with this app — you add your own, stored directly in the macOS Keychain, never in config files. Either provider alone works; with both configured they back each other up. Assign a provider per AI stage below:'),
     ('整理成文用', 'Composing'),
     ('截图召回用', 'Shot recall'),
     ('问 AI 用', 'Ask-AI'),
@@ -494,6 +494,18 @@ EN_MAP = [
     (' 个频道，合并 ', ' channel(s), merged groups for '),
     (' 个频道的组', ' channel(s)'),
     ('导入失败：文件不是有效的订阅导出 JSON', 'Import failed: not a valid subscriptions export JSON'),
+    ('Claude Code CLI（本机订阅额度，免 API 费）', 'Claude Code CLI (local subscription, no API cost)'),
+    ('Ollama（本地模型，免费离线）', 'Ollama (local models, free & offline)'),
+    ('Claude Code 模型', 'Claude Code model'),
+    ('Ollama 模型', 'Ollama model'),
+    ('走本机 Claude Code CLI 时使用（sonnet/opus/haiku 为官方别名）', 'Used when routed to the local Claude Code CLI (sonnet/opus/haiku are official aliases)'),
+    ('走本地 Ollama 时使用；点"刷新模型列表"读取已安装模型', 'Used when routed to local Ollama; click "Refresh model list" to read installed models'),
+    ('已检测到', 'detected'),
+    ('未安装', 'not installed'),
+    ('运行中', 'running'),
+    ('未运行', 'not running'),
+    ('除 API 外还支持两条本机渠道：Claude Code CLI（走你的 Claude 订阅额度，零 API 费）和 Ollama（本地模型，免费离线）。任一渠道可用即可运转，选了本机渠道失败时自动回落到已配置的 API。下面可以给每个 AI 环节分别指定用哪个渠道：', 'Besides APIs, two local channels are supported: the Claude Code CLI (uses your Claude subscription quota, zero API cost) and Ollama (local models, free & offline). Any one working channel is enough; if a local channel fails it falls back to your configured APIs. Assign a channel per AI stage below:'),
+    ('代理未运行（启动 CC Switch）', 'proxy down (start CC Switch)'),
 ]
 
 
@@ -505,8 +517,29 @@ def _tr(html: str) -> str:
     return html
 
 
+_OLL_CACHE = {"t": 0.0, "ok": False}
+
+
+def _ollama_alive() -> bool:
+    import time, urllib.request
+    if time.time() - _OLL_CACHE["t"] < 60:
+        return _OLL_CACHE["ok"]
+    ok = False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/version",
+                                    timeout=0.8):
+            ok = True
+    except Exception:
+        ok = False
+    _OLL_CACHE.update(t=time.time(), ok=ok)
+    return ok
+
+
 def _keys_ok() -> bool:
-    return _key_status("openai") or _key_status("anthropic")
+    if _key_status("openai") or _key_status("anthropic"):
+        return True
+    from .providers import _claude_cli_path
+    return bool(_claude_cli_path()) or _ollama_alive()
 
 
 def page(title: str, page_id: str, body: str):
@@ -923,6 +956,14 @@ def refresh_models():
             out["anthropic"] = sorted(m.id for m in ms.data)
         except Exception as e:
             errs.append(f"anthropic: {str(e)[:80]}")
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags",
+                                    timeout=2) as resp:
+            tags = _j.loads(resp.read().decode("utf-8"))
+        out["ollama"] = sorted(m["name"] for m in tags.get("models", []))
+    except Exception:
+        pass  # ollama 未运行则跳过，不算错误
     _models_cache_path().write_text(_j.dumps(out, ensure_ascii=False),
                                     encoding="utf-8")
     n = len(out.get("openai", [])) + len(out.get("anthropic", []))
@@ -1880,11 +1921,11 @@ def settings():
         if f.get("form") == "ai":
             for grp in ("article", "visuals", "qa"):
                 v = f.get(f"ai_{grp}")
-                if v in ("auto", "openai", "anthropic"):
+                if v in ("auto", "openai", "anthropic", "claude_cli", "ollama"):
                     cfg.data.setdefault("ai", {})[grp] = v
-            for prov in ("openai", "anthropic"):
+            for prov in ("openai", "anthropic", "claude_cli", "ollama"):
                 mv = f.get(f"model_{prov}", "").strip()
-                if mv and len(mv) < 60:
+                if mv and len(mv) < 80:
                     cfg.data.setdefault("article", {})[f"model_{prov}"] = mv
             try:
                 cfg_mod.save(cfg)
@@ -1978,8 +2019,9 @@ def settings():
     dsel = lambda v, cur: "selected" if v == cur else ""
 
     def _model_opts(prov: str, fallback: list) -> str:
-        cur = cfg.get(f"article.model_{prov}",
-                      "gpt-4o-mini" if prov == "openai" else "claude-sonnet-5")
+        _defaults = {"openai": "gpt-4o-mini", "anthropic": "claude-sonnet-5",
+                     "claude_cli": "sonnet", "ollama": "llama3.1"}
+        cur = cfg.get(f"article.model_{prov}", _defaults.get(prov, ""))
         models = _load_models().get(prov) or fallback
         if cur not in models:
             models = [cur] + models
@@ -1991,6 +2033,12 @@ def settings():
     ant_opts = _model_opts("anthropic",
                            ["claude-sonnet-5", "claude-haiku-4-5",
                             "claude-opus-4-8"])
+    cli_opts = _model_opts("claude_cli", ["sonnet", "opus", "haiku"])
+    oll_opts = _model_opts("ollama", ["llama3.1"])
+    from .providers import _claude_cli_path, claude_cli_proxy_issue
+    cli_ok = bool(_claude_cli_path())
+    cli_warn = claude_cli_proxy_issue() if cli_ok else None
+    oll_ok = _ollama_alive()
     cd = cfg.get("scheduler.confirm_dialog")
     tp = cfg.get("transcription.primary")
     am = cfg.get("article.mode")
@@ -2113,7 +2161,7 @@ def settings():
 </form>
 
 <div class=card><h3>⑥ AI · 凭证与分工</h3>
-<p class=dim>本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。任配一个即可运转，两个都配则互为备援。下面可以给每个 AI 环节分别指定用哪家：</p>
+<p class=dim>本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。除 API 外还支持两条本机渠道：Claude Code CLI（走你的 Claude 订阅额度，零 API 费）和 Ollama（本地模型，免费离线）。任一渠道可用即可运转，选了本机渠道失败时自动回落到已配置的 API。下面可以给每个 AI 环节分别指定用哪个渠道：</p>
 <form method=post style="margin-bottom:14px">
 <input type=hidden name=_csrf value={CSRF}>
 <input type=hidden name=form value=ai>
@@ -2121,29 +2169,37 @@ def settings():
 <tr><td>整理成文用</td><td><select name=ai_article>
 <option value=auto {dsel('auto', cfg.get('ai.article','auto'))}>自动（用已配置的，优先 OpenAI）</option>
 <option value=openai {dsel('openai', cfg.get('ai.article','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.article','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.article','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.article','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.article','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
 <tr><td>截图召回用</td><td><select name=ai_visuals>
 <option value=auto {dsel('auto', cfg.get('ai.visuals','auto'))}>自动</option>
 <option value=openai {dsel('openai', cfg.get('ai.visuals','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.visuals','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.visuals','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
 <tr><td>OpenAI 模型</td><td>
 <select name=model_openai style="min-width:60%">{oai_opts}</select>
 <span class=dim>走 OpenAI 时使用</span></td></tr>
 <tr><td>Anthropic 模型</td><td>
 <select name=model_anthropic style="min-width:60%">{ant_opts}</select>
 <span class=dim>走 Anthropic 时使用</span></td></tr>
+<tr><td>Claude Code 模型</td><td>
+<select name=model_claude_cli style="min-width:60%">{cli_opts}</select>
+<span class=dim>走本机 Claude Code CLI 时使用（sonnet/opus/haiku 为官方别名）</span></td></tr>
+<tr><td>Ollama 模型</td><td>
+<select name=model_ollama style="min-width:60%">{oll_opts}</select>
+<span class=dim>走本地 Ollama 时使用；点"刷新模型列表"读取已安装模型</span></td></tr>
 <tr><td>模型列表</td><td>
 <button formaction=/ai/models formmethod=post>🔄 刷新模型列表</button>
 <span class=dim>用你的 key 从各家官方 API 拉取当前可用模型</span></td></tr>
 <tr><td>问 AI 用</td><td><select name=ai_qa>
 <option value=auto {dsel('auto', cfg.get('ai.qa','auto'))}>自动</option>
 <option value=openai {dsel('openai', cfg.get('ai.qa','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.qa','auto'))}>Anthropic (Claude)</option></select></td></tr>
+<option value=anthropic {dsel('anthropic', cfg.get('ai.qa','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.qa','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.qa','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
 </table>
 <p><button>保存分工</button></p></form>
 <p class=dim>密钥状态：
  openai {'<span class=ok>已配置</span>' if _key_status('openai') else '<span class=bad>未配置</span>'} ·
- anthropic {'<span class=ok>已配置</span>' if _key_status('anthropic') else '<span class=bad>未配置</span>'}</p>
+ anthropic {'<span class=ok>已配置</span>' if _key_status('anthropic') else '<span class=bad>未配置</span>'} ·
+ Claude Code CLI {'<span class=bad>代理未运行（启动 CC Switch）</span>' if cli_warn else ('<span class=ok>已检测到</span>' if cli_ok else '<span class=bad>未安装</span>')} ·
+ Ollama {'<span class=ok>运行中</span>' if oll_ok else '<span class=bad>未运行</span>'}</p>
 <form method=post>
 <input type=hidden name=_csrf value={CSRF}><input type=hidden name=form value=keys>
 <p><input type=password name=key_openai placeholder="OpenAI key（留空=不变）" style="width:60%"></p>

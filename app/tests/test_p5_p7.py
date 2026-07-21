@@ -138,3 +138,31 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all P5/P7 tests passed")
+
+
+def test_local_provider_backends():
+    from youtube_recorder import providers as pv
+    from youtube_recorder.config import Config, DEFAULT_CONFIG, validate
+    import copy, json
+    # routing: local channel first, API fallbacks after
+    cfg = Config(copy.deepcopy(DEFAULT_CONFIG))
+    cfg.data["ai"]["article"] = "claude_cli"
+    assert pv._route(cfg, "compose") == ["claude_cli", "openai", "anthropic"]
+    cfg.data["ai"]["qa"] = "ollama"
+    assert pv._route(cfg, "report_qa") == ["ollama", "openai", "anthropic"]
+    # config validation accepts new routes
+    d = copy.deepcopy(DEFAULT_CONFIG); d["ai"]["visuals"] = "ollama"
+    assert validate(d) == []
+    d["ai"]["visuals"] = "bogus"
+    assert any("ai.visuals" in e for e in validate(d))
+    # claude -p JSON parsing
+    out = json.dumps({"type": "result", "is_error": False, "result": "你好",
+                      "usage": {"input_tokens": 10, "output_tokens": 5}})
+    assert pv._parse_claude_cli_json(out) == ("你好", 10, 5)
+    bad = json.dumps({"is_error": True, "result": "limit reached"})
+    try:
+        pv._parse_claude_cli_json(bad); assert False
+    except pv.ProviderError:
+        pass
+    # free providers never bill
+    assert pv.FREE_PROVIDERS == {"claude_cli", "ollama"}

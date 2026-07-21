@@ -203,7 +203,100 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </script>
 <main>{{ body|safe }}</main>
 <footer>YouTube Recorder v{{ version }} · By Leoluchino</footer>
-</body></html>"""
+<!--YTRP--><script>(function(){
+  var W = window;
+  function cut(s){ var m=s.length; var cs=['?','&','#','/',' ']; for(var i=0;i<cs.length;i++){ var k=s.indexOf(cs[i]); if(k>=0 && k<m) m=k; } return s.substring(0,m); }
+  function param(h,name){ var keys=['?'+name+'=','&'+name+'=','#'+name+'=']; for(var i=0;i<keys.length;i++){ var k=h.indexOf(keys[i]); if(k>=0) return cut(h.substring(k+keys[i].length)); } return ''; }
+  function allDigits(v){ if(!v) return false; for(var j=0;j<v.length;j++){ if(v[j]<'0'||v[j]>'9') return false; } return true; }
+  function startOf(h){
+    var v=param(h,'t') || param(h,'start'); if(!v) return 0;
+    if(allDigits(v)) return parseInt(v,10);
+    var secs=0, num='';
+    for(var j=0;j<v.length;j++){ var c=v[j]; if(c>='0'&&c<='9'){ num+=c; } else { var n=parseInt(num||'0',10); if(c==='h')secs+=n*3600; else if(c==='m')secs+=n*60; else if(c==='s')secs+=n; num=''; } }
+    if(num) secs+=parseInt(num,10);
+    return secs;
+  }
+  function vidOf(h){
+    if(!h) return '';
+    var s=h;
+    if(s.indexOf('watch?v=')>=0) return cut(s.split('watch?v=')[1]);
+    if(s.indexOf('youtu.be/')>=0) return cut(s.split('youtu.be/')[1]);
+    var keys=['/embed/','/live/','/shorts/','/v/'];
+    for(var i=0;i<keys.length;i++){ if(s.indexOf(keys[i])>=0) return cut(s.split(keys[i])[1]); }
+    if(s.indexOf('v=')>=0) return cut(s.split('v=')[1]);
+    return '';
+  }
+  function isExt(h){ if(!h) return false; var s=h.toLowerCase(); return s.indexOf('http://')===0||s.indexOf('https://')===0||s.indexOf('//')===0; }
+  function isLocal(h){ var s=h.toLowerCase(); return s.indexOf('127.0.0.1')>=0||s.indexOf('localhost')>=0; }
+  var box=null, titleEl=null, big=false, dragging=false, dx=0, dy=0;
+  function ensure(){
+    if(box) return;
+    var st=document.createElement('style');
+    st.textContent = ''
+      + '.ytrpip{position:fixed;z-index:99999;right:18px;bottom:18px;width:440px;background:#000;border-radius:12px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.15);display:none}'
+      + '.ytrpip.big{right:50%;bottom:50%;transform:translate(50%,50%);width:min(1000px,86vw)}'
+      + '.ytrpip .bar{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#181818;color:#eee;font:13px system-ui;cursor:move;user-select:none}'
+      + '.ytrpip .bar .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}'
+      + '.ytrpip .bar button{background:#2a2a2a;color:#eee;border:0;border-radius:6px;padding:3px 9px;cursor:pointer;font-size:13px}'
+      + '.ytrpip .bar button:hover{background:#3a3a3a}'
+      + '.ytrpip .wrap{position:relative;width:100%;aspect-ratio:16/9;background:#000}'
+      + '.ytrpip iframe{position:absolute;inset:0;width:100%;height:100%;border:0}';
+    document.head.appendChild(st);
+    box=document.createElement('div');
+    box.className='ytrpip';
+    box.innerHTML = '<div class=bar><span class=t>播放</span><button data-a=size title=放大/画中画>⤢</button><button data-a=ext title=在浏览器打开>↗</button><button data-a=close title=返回>✕</button></div><div class=wrap></div>';
+    document.body.appendChild(box);
+    titleEl = box.querySelector('.t');
+    var bar = box.querySelector('.bar');
+    box.addEventListener('click', function(e){
+      var b=e.target.closest ? e.target.closest('button') : null;
+      if(!b) return;
+      var a=b.getAttribute('data-a');
+      if(a==='close') closep();
+      else if(a==='size'){ big=!big; box.classList.toggle('big', big); }
+      else if(a==='ext'){ var u=box.getAttribute('data-url')||''; if(u) openExt(u); closep(); }
+    });
+    bar.addEventListener('mousedown', function(e){
+      if(e.target.closest('button')) return;
+      dragging=true; big=false; box.classList.remove('big');
+      var r=box.getBoundingClientRect();
+      box.style.right='auto'; box.style.bottom='auto';
+      box.style.left=r.left+'px'; box.style.top=r.top+'px';
+      dx=e.clientX-r.left; dy=e.clientY-r.top; e.preventDefault();
+    });
+    W.addEventListener('mousemove', function(e){
+      if(!dragging) return;
+      box.style.left=Math.max(0,Math.min(W.innerWidth-60,e.clientX-dx))+'px';
+      box.style.top=Math.max(0,Math.min(W.innerHeight-30,e.clientY-dy))+'px';
+    });
+    W.addEventListener('mouseup', function(){ dragging=false; });
+  }
+  function closep(){ if(!box) return; box.querySelector('.wrap').innerHTML=''; box.style.display='none'; }
+  function openPlayer(id, start, label, url){
+    ensure();
+    var wrap=box.querySelector('.wrap');
+    var f=document.createElement('iframe');
+    f.setAttribute('allow','autoplay; encrypted-media; picture-in-picture; fullscreen');
+    f.setAttribute('allowfullscreen','');
+    var src='https://www.youtube.com/embed/'+id+'?autoplay=1&rel=0';
+    if(start>0) src += '&start='+start;
+    f.src=src;
+    wrap.innerHTML=''; wrap.appendChild(f);
+    titleEl.textContent = label || '播放';
+    box.setAttribute('data-url', url || ('https://www.youtube.com/watch?v='+id));
+    box.style.display='block';
+  }
+  function openExt(u){ if(W.pywebview && W.pywebview.api && W.pywebview.api.open_external){ W.pywebview.api.open_external(u); } else { W.open(u,'_blank'); } }
+  document.addEventListener('click', function(e){
+    var a=(e.target && e.target.closest) ? e.target.closest('a') : null;
+    if(!a) return;
+    var h=a.getAttribute('href');
+    if(!isExt(h) || isLocal(h)) return;
+    var id=vidOf(h);
+    if(id && id.length>=8){ e.preventDefault(); openPlayer(id, startOf(h), (a.textContent||'').trim().slice(0,60), h); }
+    else { e.preventDefault(); openExt(h); }
+  }, true);
+})();</script><!--/YTRP--></body></html>"""
 
 
 # --- Notion 风手绘线稿插图（stroke 跟随主题色，手绘抖动路径） -----------------
@@ -589,7 +682,7 @@ def channels_export():
     return Response(body, mimetype="application/json", headers={
         "Content-Disposition":
             'attachment; filename="youtube-recorder-channels-'
-            + dbm.now()[:10] + '.json"'})
+            + dbm.local_date(dbm.now()) + '.json"'})
 
 
 @app.post("/channels/import")
@@ -789,7 +882,7 @@ def channels():
             + "<td>" + str(escape(r["name"] or ""))
             + (("<br>" + chips) if chips else "") + "</td>"
             + "<td class=dim>" + str(cid) + "</td>"
-            + "<td class=dim>" + str(escape((r["not_before"] or "")[:10])) + "</td>"
+            + "<td class=dim>" + str(escape(dbm.local_date(r["not_before"]))) + "</td>"
             + "<td>" + stbadge + "</td><td>" + acts + "</td></tr>")
     rows = "".join(parts)
     all_grps = sorted({g for row in dbm.list_channels(con)
@@ -829,15 +922,7 @@ def channels():
 <button class=primary>添加</button></form>
 <p class=dim>日期留空 = 从添加时刻起只收新视频，不回填历史。</p></div>
 <div class=card><h3>已订阅频道</h3>
-<div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-<button type=button onclick="location.href='/channels/export'">⬇ 导出订阅</button>
-<form method=post action=/channels/import enctype="multipart/form-data"
- style="display:flex;gap:6px;align-items:center;margin:0">
-<input type=hidden name=_csrf value={CSRF}>
-<input type=file name=file accept=".json" required style="font-size:12px;max-width:240px">
-<button>⬆ 导入订阅</button></form>
-<span class=dim>导出含分组/启停/起始日期；导入按频道合并，不会重复添加</span>
-</div>
+
 <form method=post>
 <input type=hidden name=_csrf value={CSRF}>
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
@@ -1054,9 +1139,14 @@ def _queue_data(con) -> dict:
         "FROM videos v LEFT JOIN channels c USING(channel_id) "
         "WHERE NOT (v.status='discovered' AND v.approved=0) "
         "ORDER BY v.updated_at DESC LIMIT 80").fetchall()
+    def _row(r):
+        d = dict(r)
+        d["pub_local"] = dbm.local_date(d.get("published_at"))
+        d["upd_local"] = dbm.local_time(d.get("updated_at"))
+        return d
     return {"counts": counts,
-            "pending": [dict(r) for r in pending],
-            "rows": [dict(r) for r in vids]}
+            "pending": [_row(r) for r in pending],
+            "rows": [_row(r) for r in vids]}
 
 
 @app.route("/queue.json")
@@ -1141,7 +1231,7 @@ async function refresh() {{
     pc.style.display = d.pending.length ? '' : 'none';
     document.getElementById('pending').innerHTML = d.pending.map(v=>`<tr>
       <td class=dim>${{esc(v.cname)}}</td><td>${{esc((v.title||v.video_id).slice(0,60))}}</td>
-      <td class=dim>${{esc((v.published_at||'').slice(0,10))}}</td>
+      <td class=dim>${{esc(v.pub_local||'')}}</td>
       <td>${{btn('approve',v.video_id,'▶ 处理','primary')}} ${{btn('skip',v.video_id,'跳过')}}</td></tr>`).join('');
     const running = ['metadata_ready','caption_check','audio_queued',
       'awaiting_transcription','transcript_ready','article_ready',
@@ -1165,10 +1255,10 @@ async function refresh() {{
       return `<tr><td class=dim>${{esc(v.cname)}}</td>
         <td class=t title="${{esc(v.title||v.video_id)}}"><div class=clamp>${{v.status==='verified' ? `<a href="/reports/${{v.video_id}}" style="color:inherit;text-decoration:underline dotted">${{esc(v.title||v.video_id)}}</a>` : esc(v.title||v.video_id)}}</div></td>
         <td class=dim>${{esc(_dur(v.duration_sec))}}</td>
-        <td class=dim>${{esc((v.published_at||'').slice(0,10))}}</td>
+        <td class=dim>${{esc(v.pub_local||'')}}</td>
         <td><span class="st ${{cls}}">${{Z[v.status]||v.status}}</span></td>
         <td class="dim t" style="max-width:220px" title="${{esc(det)}}"><div class=clamp>${{esc(det)}}</div></td>
-        <td class=dim>${{esc((v.updated_at||'').slice(11,19))}}</td><td>${{act}}</td></tr>`;
+        <td class=dim>${{esc(v.upd_local||'')}}</td><td>${{act}}</td></tr>`;
     }}).join('') : `<tr><td colspan=8>${{document.getElementById('dd-empty').innerHTML}}</td></tr>`;
   }} catch(e) {{}}
 }}
@@ -1301,8 +1391,8 @@ def reports_json():
             "video_id": r["video_id"],
             "title": Path(r["note_path"]).stem.rsplit("--", 1)[0],
             "channel": r["cname"] or "未知频道",
-            "published": (r["published_at"] or "")[:10],
-            "generated": r["at"][:10],
+            "published": dbm.local_date(r["published_at"]),
+            "generated": dbm.local_date(r["at"]),
             "duration_sec": r["duration_sec"] or 0,
             "tags": tags,
             "grps": _grps_of(r["cgrp"]) if "cgrp" in r.keys() else [],
@@ -1442,8 +1532,7 @@ def reports_digest():
     from .paths import work_dir
     items = []
     for r in rows:
-        day = (r["published_at"] or r["note_path"] or "")[:10]
-        if (r["published_at"] or "")[:10] != date:
+        if dbm.local_date(r["published_at"]) != date:
             continue
         if grp:
             raw_sel = [g.strip() for g in grp.split(",")]
@@ -2064,7 +2153,15 @@ def settings():
 2. 本软件默认不内置任何 API key，需要你自己添加（见第 ⑥ 节）/ No API key ships by default — add your own in section ⑥.<br>
 3. 各 AI 环节可分别指定使用哪个 API（也在第 ⑥ 节）/ Each AI stage can use a different provider — also in section ⑥.</p></div>
 
-<div class=card><h3>① 嗅探 · 发现新视频</h3>
+<div class=card><h3>訂閱 · 導入 / 導出</h3><div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<button type=button onclick="location.href='/channels/export'">⬇ 导出订阅</button>
+<form method=post action=/channels/import enctype="multipart/form-data"
+ style="display:flex;gap:6px;align-items:center;margin:0">
+<input type=hidden name=_csrf value={CSRF}>
+<input type=file name=file accept=".json" required style="font-size:12px;max-width:240px">
+<button>⬆ 导入订阅</button></form>
+<span class=dim>导出含分组/启停/起始日期；导入按频道合并，不会重复添加</span>
+</div></div><div class=card><h3>① 嗅探 · 发现新视频</h3>
 <p class=dim>按排班表整点唤醒（睡眠错过的唤醒后合并补跑），逐个检查订阅频道的 RSS。发现新视频后：自动模式直接进入处理，确认模式先在 Queue 列出等你逐条确认——两种模式都能随时跳过单条。</p>
 <div class=hours>{hour_boxes}</div>
 <table class=wrap>

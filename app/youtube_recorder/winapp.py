@@ -10,6 +10,15 @@ import time
 from pathlib import Path
 
 from . import BRANDING
+import webbrowser as _wb
+class _YtrApi:
+    def open_external(self, url):
+        try:
+            _wb.open(url)
+        except Exception:
+            pass
+        return True
+_YTR_API = _YtrApi()
 
 HOST, PORT = "127.0.0.1", 8765
 
@@ -37,7 +46,7 @@ def main() -> int:
 
     _set_dock_icon()
     webview.create_window(BRANDING, f"http://{HOST}:{PORT}",
-                          width=1120, height=820, min_size=(860, 600))
+                          width=1120, height=820, min_size=(860, 600), js_api=_YTR_API)
     webview.start()  # blocks until window closed
     return 0
 

@@ -59,9 +59,20 @@ def probe(video_id: str, cfg) -> ProbeResult:
 
     title = info.get("title") or ""
     duration = int(info.get("duration") or 0)
-    upload_date = info.get("upload_date")  # YYYYMMDD
-    published = (f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}T00:00:00Z"
-                 if upload_date else None)
+    # Prefer the precise publication instant (epoch seconds, UTC) over the
+    # date-only `upload_date` (YYYYMMDD): the latter drops the time and pins
+    # everything to midnight UTC, so a video published in the local morning
+    # (which is the previous day in UTC) landed on the wrong calendar day.
+    # Fall back to upload_date at midnight only when no timestamp exists.
+    _ts = info.get("timestamp") or info.get("release_timestamp")
+    _ud = info.get("upload_date")  # YYYYMMDD
+    if _ts:
+        from datetime import datetime as _dt, timezone as _tz
+        published = _dt.fromtimestamp(int(_ts), tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif _ud:
+        published = f"{_ud[:4]}-{_ud[4:6]}-{_ud[6:]}T00:00:00Z"
+    else:
+        published = None
 
     base = dict(title=title, duration_sec=duration, published_at=published,
                 channel_id=info.get("channel_id"),

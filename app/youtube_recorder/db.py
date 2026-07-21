@@ -112,6 +112,43 @@ def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_iso(ts: str | None) -> datetime | None:
+    """Parse a stored/feed ISO8601 timestamp into an aware datetime.
+
+    Handles both our own UTC 'Z' stamps (see now()) and YouTube feed values
+    that carry an explicit offset (e.g. '2026-07-21T05:30:00+00:00'). A bare
+    value with no offset is assumed to be UTC.
+    """
+    if not ts:
+        return None
+    s = ts.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def local_date(ts: str | None) -> str:
+    """UTC-stored timestamp -> local calendar date 'YYYY-MM-DD'.
+
+    Timestamps are stored in UTC for stable sorting, but the user thinks in
+    their own timezone. Converting on display keeps a video processed at, say,
+    09:00 local (which is the previous day in UTC) on the correct local day.
+    Falls back to a naive slice if the value can't be parsed.
+    """
+    dt = _parse_iso(ts)
+    return dt.astimezone().strftime("%Y-%m-%d") if dt else (ts or "")[:10]
+
+
+def local_time(ts: str | None) -> str:
+    """UTC-stored timestamp -> local wall-clock time 'HH:MM:SS'."""
+    dt = _parse_iso(ts)
+    return dt.astimezone().strftime("%H:%M:%S") if dt else (ts or "")[11:19]
+
+
 def connect(path: Path = DB_FILE) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)

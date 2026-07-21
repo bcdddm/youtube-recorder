@@ -13,7 +13,7 @@ from pathlib import Path
 from .paths import DB_FILE
 from . import state as st
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -187,6 +187,22 @@ def _migrate(con: sqlite3.Connection) -> None:
     if "grp" not in ccols:
         con.execute("ALTER TABLE channels ADD COLUMN grp TEXT DEFAULT ''")
         con.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+        con.commit()
+
+
+    # v5: platform 字段（youtube/bilibili/podcast）
+    if "platform" not in ccols:
+        con.execute("ALTER TABLE channels ADD COLUMN platform TEXT NOT NULL DEFAULT 'youtube'")
+        con.execute("ALTER TABLE videos ADD COLUMN platform TEXT NOT NULL DEFAULT 'youtube'")
+        con.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
+        con.commit()
+
+
+    # v6: media_url（播客音频直链）
+    vcols = {r["name"] for r in con.execute("PRAGMA table_info(videos)")}
+    if "media_url" not in vcols:
+        con.execute("ALTER TABLE videos ADD COLUMN media_url TEXT")
+        con.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
         con.commit()
 
 

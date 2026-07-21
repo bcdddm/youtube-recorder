@@ -833,7 +833,19 @@ def channels():
                        + str(escape(row["src_channel_name"] or cid)) + '</span>')
         elif f.get("url"):
             url = f.get("url", "").strip()
-            if url.startswith("https://www.youtube.com/") or url.startswith("https://youtube.com/"):
+            from . import platforms as _pf
+            _det = _pf.detect(url)
+            if _det and _det.get("platform") == "bilibili":
+                _cid = _det["channel_id"]
+                _name = _pf.bili_name(_cid) or ("B站 " + _cid.split(":")[-1])
+                _nb = f.get("not_before") or None
+                if _nb and len(_nb) == 10:
+                    _nb += "T00:00:00Z"
+                dbm.add_channel(con, _cid, _det["url"], _name, not_before=_nb)
+                con.execute("UPDATE channels SET platform='bilibili' WHERE channel_id=?", (_cid,))
+                con.commit()
+                msg = f'<span class=ok>已添加 B站 {escape(_name)}</span>'
+            elif url.startswith("https://www.youtube.com/") or url.startswith("https://youtube.com/"):
                 try:
                     from .cli import _resolve_channel_id
                     cid, name = _resolve_channel_id(url)
@@ -845,7 +857,20 @@ def channels():
                 except SystemExit as e:
                     msg = f'<span class=bad>{escape(str(e))}</span>'
             else:
-                msg = '<span class=bad>请输入 youtube.com 频道链接</span>'
+                _pi = _pf.podcast_info(url)
+                if _pi:
+                    import hashlib as _h
+                    _cid = "pod:" + _h.sha1(url.encode("utf-8")).hexdigest()[:14]
+                    _nb = f.get("not_before") or None
+                    if _nb and len(_nb) == 10:
+                        _nb += "T00:00:00Z"
+                    dbm.add_channel(con, _cid, url, _pi[0], not_before=_nb)
+                    con.execute("UPDATE channels SET platform='podcast' WHERE channel_id=?", (_cid,))
+                    con.commit()
+                    msg = f'<span class=ok>已添加 播客 {escape(_pi[0])}（{_pi[1]} 集）</span>'
+                else:
+                    msg = '<span class=bad>无法识别：请粘贴 YouTube 频道 / B站 space.bilibili.com/UID / 播客 RSS 链接</span>'
+
 
     parts = []
     for r in dbm.list_channels(con):
@@ -917,7 +942,7 @@ def channels():
 <div class=card>{DOODLES['channels']}<h3>添加频道</h3>{msg}
 <form method=post style="display:flex;gap:8px;flex-wrap:wrap">
 <input type=hidden name=_csrf value={CSRF}>
-<input name=url placeholder="https://www.youtube.com/@频道" style="flex:1;min-width:280px">
+<input name=url placeholder="YouTube 频道 / B站 space.bilibili.com/UID / 播客 RSS" style="flex:1;min-width:280px">
 <input name=not_before type=date title="只处理此日期之后发布的视频（留空=从现在起）">
 <button class=primary>添加</button></form>
 <p class=dim>日期留空 = 从添加时刻起只收新视频，不回填历史。</p></div>
@@ -1182,6 +1207,12 @@ def queue():
             v = dbm.get_video(con, f["retry"])
             if v and v["status"] in (st.FAILED, st.DEAD_LETTER):
                 dbm.set_status(con, f["retry"], f.get("stage", st.DISCOVERED))
+            elif v and v["status"] not in st.TERMINAL_STAGES:
+                try:
+                    dbm.set_status(con, f["retry"], st.FAILED, error_code="user_rerun")
+                    dbm.set_status(con, f["retry"], st.DISCOVERED)
+                except st.TransitionError:
+                    pass
         if f.get("approve") or f.get("approve_all"):
             con.close()
             return redirect(url_for("run_now_get"))
@@ -1241,13 +1272,17 @@ async function refresh() {{
         :(v.status==='failed'||v.status==='dead_letter')?'bad'
         :(running.includes(v.status)?'run':'');
       let act='';
+      const _stuckMin = v.updated_at ? Math.round((Date.now()-Date.parse(v.updated_at))/60000) : 0;
+      const _isStuck = running.includes(v.status) && _stuckMin >= 10;
       if (v.status==='failed'||v.status==='dead_letter')
         act = btn('retry',v.video_id,'重试');
+      else if (_isStuck) act = btn('retry',v.video_id,'重新运行');
       const skippable = ['discovered','metadata_ready','caption_check','audio_queued',
                          'awaiting_transcription','transcript_ready','article_ready'];
       if (skippable.includes(v.status))
         act += ' ' + btn('skip',v.video_id,'跳过');
       let det = v.error_code || v.last_detail || '';
+      if (_isStuck && v.status !== 'awaiting_transcription') det = '⚠ 已卡在此步 ' + _stuckMin + ' 分钟，可点重新运行';
       if (v.status === 'awaiting_transcription' && v.updated_at) {{
         const mins = Math.max(0, Math.round((Date.now() - Date.parse(v.updated_at)) / 60000));
         det = `已等待 ${{mins}} 分钟（出稿后自动继续）`;
@@ -1484,8 +1519,29 @@ def tags_merge():
     return {"ok": True, "merged": len(tmap), "total": len(tags)}
 
 
+def _digest_note_text(note_path, limit=6000):
+    '''Persistent article body for the daily digest: read the vault wiki note,
+    strip YAML frontmatter and image lines, truncate.'''
+    from pathlib import Path as _P
+    try:
+        raw = _P(note_path).read_text(encoding='utf-8')
+    except Exception:
+        return ''
+    lines = raw.split(chr(10))
+    if lines and lines[0].strip() == '---':
+        end = None
+        for i in range(1, len(lines)):
+            if lines[i].strip() == '---':
+                end = i
+                break
+        if end is not None:
+            lines = lines[end + 1:]
+    out = [ln for ln in lines if not ln.strip().startswith('![')]
+    return (chr(10).join(out)).strip()[:limit]
+
+
 DIGEST_SYSTEM = """你是情报汇总编辑。给你某一天收到的多篇视频文章的完整材料
-（标题/频道/摘要/全部要点/章节标题）。输出当日汇总报告（Markdown），要求：
+（标题/频道/完整正文，可能较长）。输出当日汇总报告（Markdown），要求：
 # 当日情报汇总（{date}）
 1. 总览：3-5 句概括当天信息全貌。
 2. 按主题归并的详细要点：**必须覆盖材料中的每一条要点，一条都不许漏**；
@@ -1551,6 +1607,7 @@ def reports_digest():
             "vid": r["video_id"],
             "title": meta.get("title_zh") or r["title"] or r["video_id"],
             "channel": r["cname"] or "",
+            "content": _digest_note_text(r["note_path"]),
             "summary": meta.get("summary", ""),
             "takeaways": meta.get("takeaways", []),
             "sections": [sec.get("heading", "")

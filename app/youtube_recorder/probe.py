@@ -43,13 +43,16 @@ def _classify_error(msg: str) -> str:
     return "permanent" if any(m in low for m in PERMANENT_MARKERS) else "transient"
 
 
-def probe(video_id: str, cfg) -> ProbeResult:
+def probe(video_id: str, cfg, platform: str = "youtube") -> ProbeResult:
+    if platform == "podcast":
+        return ProbeResult("transcribe")
     try:
         import yt_dlp
     except ImportError:
         return ProbeResult("transient", reason="yt_dlp_not_installed")
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    from . import platforms
+    url = platforms.watch_url(platform, video_id)
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as y:
             info = y.extract_info(url, download=False)

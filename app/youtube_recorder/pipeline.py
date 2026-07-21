@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import db as dbm
 from . import state as st
-from . import discovery, probe as probe_mod, download as dl, watchfolder as wf
+from . import discovery, probe as probe_mod, download as dl, watchfolder as wf, platforms
 from . import transcript as tr
 from .paths import work_dir
 
@@ -79,6 +79,27 @@ def run_discovery(con, cfg, log, stats: RunStats) -> list[str]:
     new_ids: list[str] = []
     for ch in dbm.list_channels(con, enabled_only=True):
         stats.feeds_checked += 1
+        if ch["platform"] == "podcast":
+            _nb_p = ch["not_before"]
+            for it in platforms.fetch_podcast(ch["url"]):
+                if _nb_p and it["published"] and it["published"] < _nb_p:
+                    continue
+                if dbm.upsert_discovered(con, it["video_id"], ch["channel_id"], it["title"], it["published"]):
+                    con.execute("UPDATE videos SET platform='podcast', media_url=?, duration_sec=? WHERE video_id=?", (it["media_url"], it["duration_sec"], it["video_id"]))
+                    con.commit()
+                    new_ids.append(it["video_id"])
+                    stats.discovered += 1
+                    log.event("video_discovered", video_id=it["video_id"], channel_id=ch["channel_id"], title=(it["title"] or "")[:80])
+            continue
+        if ch["platform"] == "bilibili":
+            for it in platforms.fetch_bilibili(ch["channel_id"]):
+                if dbm.upsert_discovered(con, it["video_id"], ch["channel_id"], it["title"], None):
+                    con.execute("UPDATE videos SET platform='bilibili' WHERE video_id=?", (it["video_id"],))
+                    con.commit()
+                    new_ids.append(it["video_id"])
+                    stats.discovered += 1
+                    log.event("video_discovered", video_id=it["video_id"], channel_id=ch["channel_id"], title=(it["title"] or "")[:80])
+            continue
         res = discovery.fetch_feed(ch["channel_id"], ch["feed_etag"],
                                    ch["feed_last_modified"])
         if res.status == "not_modified":
@@ -116,7 +137,7 @@ def process_discovered(con, cfg, log, stats: RunStats) -> None:
     for v in batch:
         vid = v["video_id"]
         aid = dbm.start_attempt(con, vid, st.METADATA_READY)
-        pr = probe_mod.probe(vid, cfg)
+        pr = probe_mod.probe(vid, cfg, platform=v["platform"])
         dbm.update_video_meta(con, vid, title=pr.title or None,
                               duration_sec=pr.duration_sec or None,
                               published_at=pr.published_at)
@@ -153,7 +174,7 @@ def process_audio_queue(con, cfg, log, stats: RunStats) -> None:
     for v in dbm.videos_by_status(con, st.AUDIO_QUEUED):
         vid = v["video_id"]
         aid = dbm.start_attempt(con, vid, st.AUDIO_QUEUED)
-        res = dl.download_audio(vid)
+        res = dl.download_audio(vid, platform=v["platform"], media_url=v["media_url"])
         if not res.ok:
             dbm.end_attempt(con, aid, "error", error_code=res.error_kind,
                             detail=res.reason)
@@ -314,6 +335,11 @@ def process_visuals(con, cfg, log, stats: RunStats) -> None:
     for v in dbm.videos_by_status(con, st.ARTICLE_READY):
         vid = v["video_id"]
         wd = work_dir(vid)
+        if v["platform"] == "podcast":
+            vz.save_plan([], wd)
+            _set(con, vid, st.VISUAL_PLANNED)
+            _set(con, vid, st.FRAMES_READY)
+            continue
         if (wd / "visual-plan.json").exists():
             _set(con, vid, st.VISUAL_PLANNED)
             _set(con, vid, st.FRAMES_READY)
@@ -397,7 +423,7 @@ def write_vault(con, cfg, log, stats: RunStats) -> None:
         ch = con.execute("SELECT name FROM channels WHERE channel_id=?",
                          (v["channel_id"],)).fetchone()
         channel = ch["name"] if ch else ""
-        url = f"https://www.youtube.com/watch?v={vid}"
+        url = (v["media_url"] or "") if v["platform"] == "podcast" else platforms.watch_url(v["platform"], vid)
         # copy selected frames into the vault attachments dir
         from . import visuals as vz
         images = []

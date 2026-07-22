@@ -14,7 +14,8 @@ from . import db as dbm
 from .creds import get_key
 
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5", "openai": "gpt-4o-mini",
-                  "claude_cli": "sonnet", "ollama": "llama3.1"}
+                  "claude_cli": "sonnet", "ollama": "llama3.1",
+                  "qwen": "qwen-plus", "kimi": "moonshot-v1-32k"}
 
 # 订阅/本地渠道：不产生按量费用
 FREE_PROVIDERS = {"claude_cli", "ollama"}
@@ -77,6 +78,45 @@ def _call_openai(model: str, system: str, user: str, max_tokens: int):
         raise ProviderError(f"openai: {e}")
     u = r.usage
     return r.choices[0].message.content, u.prompt_tokens, u.completion_tokens
+
+
+OPENAI_COMPAT_BASE = {
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "kimi": "https://api.moonshot.cn/v1",
+}
+
+
+def _call_openai_like(prov, model, system, user, max_tokens):
+    key = get_key(prov)
+    if not key:
+        raise ProviderError(f"no {prov} key (Keychain: ytrec-{prov})", transient=False)
+    try:
+        from openai import OpenAI, APIStatusError, APIError
+    except ImportError as e:
+        raise ProviderError(f"openai sdk import failed: {e}", transient=False)
+    client = OpenAI(api_key=key, base_url=OPENAI_COMPAT_BASE[prov])
+    try:
+        r = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}])
+    except APIStatusError as e:
+        raise ProviderError(f"{prov} http {e.status_code}",
+                            transient=e.status_code in (429, 500, 502, 503))
+    except APIError as e:
+        raise ProviderError(f"{prov}: {e}")
+    u = r.usage
+    return (r.choices[0].message.content,
+            getattr(u, "prompt_tokens", 0) or 0,
+            getattr(u, "completion_tokens", 0) or 0)
+
+
+def _call_qwen(model, system, user, max_tokens):
+    return _call_openai_like("qwen", model, system, user, max_tokens)
+
+
+def _call_kimi(model, system, user, max_tokens):
+    return _call_openai_like("kimi", model, system, user, max_tokens)
 
 
 def _claude_cli_path() -> str | None:
@@ -186,7 +226,8 @@ def _call_ollama(model: str, system: str, user: str, max_tokens: int):
 
 
 _CALLERS = {"anthropic": _call_anthropic, "openai": _call_openai,
-            "claude_cli": _call_claude_cli, "ollama": _call_ollama}
+            "claude_cli": _call_claude_cli, "ollama": _call_ollama,
+            "qwen": _call_qwen, "kimi": _call_kimi}
 
 
 PURPOSE_GROUP = {
@@ -200,7 +241,7 @@ def _route(cfg, purpose: str) -> list[str]:
     """按环节选择 API：ai.article / ai.visuals / ai.qa（auto=先用已配置的）。"""
     group = PURPOSE_GROUP.get(purpose, "article")
     sel = cfg.get(f"ai.{group}", "auto") if cfg else "auto"
-    if sel in ("openai", "anthropic", "claude_cli", "ollama"):
+    if sel in ("openai", "anthropic", "claude_cli", "ollama", "qwen", "kimi"):
         return [sel] + [x for x in ("openai", "anthropic") if x != sel]
     from .creds import get_key
     return (["openai", "anthropic"] if get_key("openai")

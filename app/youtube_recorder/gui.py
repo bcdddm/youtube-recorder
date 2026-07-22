@@ -167,9 +167,9 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  ::-webkit-scrollbar-track{background:transparent}
 </style></head><body>
 <nav>
- {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('settings','Settings')] %}
+ {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('api','API'),('settings','Settings')] %}
  <a href="/{{p}}" class="{{'on' if page==p else ''}}">{{l}}</a>{% endfor %}
- <button id=themebtn style="margin-left:auto;border:none;background:transparent;color:var(--dim);padding:4px 8px;display:flex;align-items:center"></button>
+ <a href=https://github.com/bcdddm/youtube-recorder/issues style='color:var(--dim);padding:4px 8px;text-decoration:none' title=GitHub反馈>💬 反馈</a><button id=themebtn style="margin-left:auto;border:none;background:transparent;color:var(--dim);padding:4px 8px;display:flex;align-items:center"></button>
  <span class="brand" style="margin-left:8px">YouTube Recorder</span>
 </nav>
 <script>
@@ -203,7 +203,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </script>
 <main>{{ body|safe }}</main>
 <footer>YouTube Recorder v{{ version }} · By Leoluchino</footer>
-<!--YTRP--><script>(function(){
+<script>window.DIGEST_LAST_SEC={{ digest_last_sec }};window.digestBusy=function(label){var o=document.createElement('div');o.className='busy';o.innerHTML='<div class=ring></div><div class=txt id=_dgtxt></div>';document.body.appendChild(o);var t0=Date.now();var last=window.DIGEST_LAST_SEC||0;var el=document.getElementById('_dgtxt');function tick(){var sec=Math.round((Date.now()-t0)/1000);var hint=last>0?('上次用了约 '+last+' 秒'):'首次生成，通常 10–40 秒';el.innerHTML='正在总结 '+(label||'')+'…<br><span style="font-size:12px;opacity:.75">已用 '+sec+' 秒 · '+hint+'</span>';}tick();setInterval(tick,1000);return o;};window.digestSubmit=function(form,label){digestBusy(label);var fd=new FormData(form);fetch(form.getAttribute('action')||'/reports/digest',{method:'POST',body:fd}).then(function(r){return r.text();}).then(function(h){document.open();document.write(h);document.close();}).catch(function(){location.reload();});return false;};</script><!--YTRP--><script>(function(){
   var W = window;
   function cut(s){ var m=s.length; var cs=['?','&','#','/',' ']; for(var i=0;i<cs.length;i++){ var k=s.indexOf(cs[i]); if(k>=0 && k<m) m=k; } return s.substring(0,m); }
   function param(h,name){ var keys=['?'+name+'=','&'+name+'=','#'+name+'=']; for(var i=0;i<keys.length;i++){ var k=h.indexOf(keys[i]); if(k>=0) return cut(h.substring(k+keys[i].length)); } return ''; }
@@ -640,7 +640,8 @@ def page(title: str, page_id: str, body: str):
         body = ('<div class=banner>⚠️ 尚未配置 AI 密钥——文章生成与智能截图不可用。'
                 '<a href="/settings">前往设置添加 →</a></div>') + body
     return _tr(render_template_string(BASE, title=title, page=page_id,
-                                      body=body, version=__version__))
+                                      body=body, version=__version__,
+                                      digest_last_sec=_digest_last_sec()))
 
 
 def check_csrf():
@@ -1077,7 +1078,7 @@ def refresh_models():
     _models_cache_path().write_text(_j.dumps(out, ensure_ascii=False),
                                     encoding="utf-8")
     n = len(out.get("openai", [])) + len(out.get("anthropic", []))
-    return redirect(url_for("settings",
+    return redirect(url_for("api_page",
                             models=("err:" + ";".join(errs)) if errs else str(n)))
 
 
@@ -1569,6 +1570,19 @@ def _digest_cache_path(date: str, grp: str):
     return d / (_h.sha256(key.encode()).hexdigest()[:16] + "__" + date + ".md")
 
 
+def _digest_timing_path():
+    from .paths import APP_SUPPORT
+    return APP_SUPPORT / "digest-timing.json"
+
+
+def _digest_last_sec():
+    import json as _j
+    try:
+        return int(_j.loads(_digest_timing_path().read_text(encoding="utf-8")).get("last_sec", 0))
+    except Exception:
+        return 0
+
+
 @app.route("/reports/digest", methods=["POST"])
 def reports_digest():
     check_csrf()
@@ -1627,11 +1641,15 @@ def reports_digest():
     else:
         user = _j.dumps([{k: v for k, v in it.items() if k != "vid"}
                          for it in items], ensure_ascii=False)[:60000]
+        import time as _time
+        _t0 = _time.time()
         try:
             md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
                                     DIGEST_SYSTEM.format(date=date), user,
                                     max_tokens=5000, purpose="report_qa")
             cache.write_text(md, encoding="utf-8")
+            import json as _jt
+            _digest_timing_path().write_text(_jt.dumps({"last_sec": int(_time.time() - _t0)}), encoding="utf-8")
         except Exception as e:
             md = f"生成失败：{e}"
     html = _md_to_html(md, "digest")
@@ -1644,7 +1662,7 @@ def reports_digest():
     cache_note = ('<span class="st ok" style="margin-left:8px">已加载缓存</span>'
                   if cached else
                   '<span class="st run" style="margin-left:8px">新生成</span>')
-    regen = (f'<form method=post action=/reports/digest style="display:inline;margin-left:8px">'
+    regen = (f'<form method=post action=/reports/digest style="display:inline;margin-left:8px" onsubmit="return digestSubmit(this)">'
              f'<input type=hidden name=_csrf value={CSRF}>'
              f'<input type=hidden name=date value="{escape(date)}">'
              f'<input type=hidden name=grp value="{escape(grp)}">'
@@ -1770,16 +1788,12 @@ function renderManage(rows) {
   return `<div class=card>${head}${body}</table></div>`;
 }
 function digest(d) {
-  const o = document.createElement('div'); o.className = 'busy';
-  o.innerHTML = `<div class=ring></div><div class=txt>正在总结 ${esc(d)} 的全部内容…<br>
-    <span style="font-size:12px;opacity:.7">要覆盖每一条要点，请稍候（约 10–30 秒）</span></div>`;
-  document.body.appendChild(o);
   const gsel = [...GRPS].join(',');
   const f = document.createElement('form'); f.method='post'; f.action='/reports/digest';
   f.innerHTML = `<input type=hidden name=_csrf value="${CSRF_T}">
     <input type=hidden name=date value="${d}">
     <input type=hidden name=grp value="${gsel}">`;
-  document.body.appendChild(f); f.submit();
+  document.body.appendChild(f); digestSubmit(f, d);
 }
 function bulkDelete() {
   const ids = [...document.querySelectorAll('.mgc:checked')].map(c=>c.value);
@@ -1837,6 +1851,7 @@ function render() {
              : renderRead(rows);
   document.getElementById('list').innerHTML =
     html || `<div class=card>${document.getElementById('dd-empty').innerHTML.replace('这里还什么都没有','没有匹配的文章')}</div>`;
+  if (MODE === 'timeline') { requestAnimationFrame(() => { const tw = document.querySelector('.tlwrap'); if (tw) tw.scrollLeft = tw.scrollWidth; }); }
   const mg = document.getElementById('mgcount'); if (mg) mg.textContent = `共 ${rows.length} 篇`;
 }
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
@@ -2039,6 +2054,99 @@ def _key_status(name: str) -> bool:
         return r.returncode == 0
     except OSError:
         return False  # non-macOS (tests)
+
+
+@app.route('/api', methods=['GET', 'POST'])
+def api_page():
+    cfg = cfg_mod.load()
+    esc = lambda v: str(escape(v))
+    msg = ''
+    mres = request.args.get('models', '')
+    if mres.startswith('err:'):
+        msg = '<span class=bad>拉取模型列表部分失败：' + esc(mres[4:]) + '</span>'
+    elif mres:
+        msg = '<span class=ok>模型列表已刷新（共 ' + esc(mres) + ' 个）</span>'
+    if request.method == 'POST':
+        check_csrf()
+        f = request.form
+        if f.get('form') == 'ai':
+            for grp in ('article', 'visuals', 'qa'):
+                v = f.get('ai_' + grp)
+                if v in ('auto', 'openai', 'anthropic', 'claude_cli', 'ollama', 'qwen', 'kimi'):
+                    cfg.data.setdefault('ai', {})[grp] = v
+            for prov in ('openai', 'anthropic', 'claude_cli', 'ollama', 'qwen', 'kimi'):
+                mv = f.get('model_' + prov, '').strip()
+                if mv and len(mv) < 80:
+                    cfg.data.setdefault('article', {})['model_' + prov] = mv
+            try:
+                cfg_mod.save(cfg); msg = '<span class=ok>AI 分工已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = '<span class=bad>' + esc(str(e)) + '</span>'
+            cfg = cfg_mod.load()
+        elif f.get('form') == 'asr':
+            cfg.data.setdefault('transcription', {})['audio_base_url'] = f.get('audio_base_url', '').strip()
+            cfg.data['transcription']['audio_key'] = (f.get('audio_key', 'openai').strip() or 'openai')
+            _am = f.get('api_model', '').strip()
+            if _am:
+                cfg.data['transcription']['api_model'] = _am
+            try:
+                cfg_mod.save(cfg); msg = '<span class=ok>语音识别接口已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = '<span class=bad>' + esc(str(e)) + '</span>'
+            cfg = cfg_mod.load()
+        elif f.get('form') == 'keys':
+            for prov in ('openai', 'anthropic', 'qwen', 'kimi', 'siliconflow'):
+                val = f.get('key_' + prov, '').strip()
+                if val:
+                    subprocess.run(['security', 'delete-generic-password', '-s', 'ytrec-' + prov], capture_output=True)
+                    r = subprocess.run(['security', 'add-generic-password', '-s', 'ytrec-' + prov, '-a', 'ytrec', '-w', val], capture_output=True, text=True)
+                    msg += ('<span class=ok>' + prov + ' key 已存入钥匙串</span> ' if r.returncode == 0 else '<span class=bad>' + prov + ' 保存失败</span> ')
+    dsel = lambda v, cur: 'selected' if v == cur else ''
+    def _mopts(prov, fallback):
+        _d = {'openai': 'gpt-4o-mini', 'anthropic': 'claude-sonnet-5', 'claude_cli': 'sonnet', 'ollama': 'llama3.1', 'qwen': 'qwen-plus', 'kimi': 'moonshot-v1-32k'}
+        cur = cfg.get('article.model_' + prov, _d.get(prov, ''))
+        models = _load_models().get(prov) or fallback
+        if cur not in models:
+            models = [cur] + models
+        return ''.join('<option ' + ('selected' if m == cur else '') + '>' + esc(m) + '</option>' for m in models)
+    _provs = [('auto', '自动（用已配置的，优先 OpenAI）'), ('openai', 'OpenAI'), ('anthropic', 'Anthropic (Claude)'), ('qwen', 'Qwen 通义千问'), ('kimi', 'Kimi 月之暗面'), ('claude_cli', 'Claude Code CLI（订阅额度，免 API 费）'), ('ollama', 'Ollama（本地，免费离线）')]
+    def _sel(grp):
+        cur = cfg.get('ai.' + grp, 'auto')
+        return ''.join('<option value=' + pv + ' ' + dsel(pv, cur) + '>' + esc(lb) + '</option>' for pv, lb in _provs)
+    def _krow(prov, label):
+        st = '<span class=ok>已配置</span>' if _key_status(prov) else '<span class=dim>未配置</span>'
+        return '<p>' + label + ' ' + st + '<br><input type=password name=key_' + prov + ' placeholder=' + chr(39) + prov + ' key（留空=不变）' + chr(39) + ' style=width:60%></p>'
+    _fb = {'openai': ['gpt-4o-mini', 'gpt-4o'], 'anthropic': ['claude-sonnet-5', 'claude-haiku-4-5'], 'qwen': ['qwen-plus', 'qwen-max', 'qwen-turbo'], 'kimi': ['moonshot-v1-32k', 'moonshot-v1-8k', 'moonshot-v1-128k'], 'claude_cli': ['sonnet', 'opus', 'haiku'], 'ollama': ['llama3.1']}
+    from .providers import _claude_cli_path, claude_cli_proxy_issue
+    cli_ok = bool(_claude_cli_path()); cli_warn = claude_cli_proxy_issue() if cli_ok else None
+    oll_ok = _ollama_alive()
+    a_bu = esc(cfg.get('transcription.audio_base_url', '') or '')
+    a_key = esc(cfg.get('transcription.audio_key', 'openai') or 'openai')
+    a_model = esc(cfg.get('transcription.api_model', 'whisper-1') or 'whisper-1')
+    p = []
+    p.append('<div class=card><h3>API · 凭证与分工</h3>')
+    if msg:
+        p.append('<p>' + msg + '</p>')
+    p.append('<p class=dim>密钥写入 macOS 钥匙串，不经过配置文件。支持 OpenAI / Anthropic / Qwen 通义千问 / Kimi 月之暗面 云端 API，以及本机 Claude Code CLI、Ollama。可给每个环节分别指定渠道，选本机渠道失败时自动回落到已配置的 API。</p>')
+    p.append('<form method=post style=margin-bottom:14px><input type=hidden name=_csrf value=' + CSRF + '><input type=hidden name=form value=ai><table class=wrap>')
+    p.append('<tr><td>整理成文用</td><td><select name=ai_article>' + _sel('article') + '</select></td></tr>')
+    p.append('<tr><td>截图召回用</td><td><select name=ai_visuals>' + _sel('visuals') + '</select></td></tr>')
+    p.append('<tr><td>问 AI 用</td><td><select name=ai_qa>' + _sel('qa') + '</select></td></tr>')
+    for pv, lb in [('openai', 'OpenAI 模型'), ('anthropic', 'Anthropic 模型'), ('qwen', 'Qwen 模型'), ('kimi', 'Kimi 模型'), ('claude_cli', 'Claude Code 模型'), ('ollama', 'Ollama 模型')]:
+        p.append('<tr><td>' + lb + '</td><td><select name=model_' + pv + ' style=min-width:60%>' + _mopts(pv, _fb[pv]) + '</select></td></tr>')
+    p.append('<tr><td>模型列表</td><td><button formaction=/ai/models formmethod=post>🔄 刷新模型列表</button></td></tr>')
+    p.append('</table><p><button class=primary>保存分工</button></p></form>')
+    p.append('<form method=post><input type=hidden name=_csrf value=' + CSRF + '><input type=hidden name=form value=keys>')
+    p.append(_krow('openai', 'OpenAI') + _krow('anthropic', 'Anthropic') + _krow('qwen', 'Qwen 通义千问') + _krow('kimi', 'Kimi 月之暗面') + _krow('siliconflow', 'SiliconFlow（中文语音识别）'))
+    p.append('<button>保存密钥</button></form>')
+    p.append('<p class=dim>本机渠道：Claude Code CLI ' + ('<span class=bad>代理未运行</span>' if cli_warn else ('<span class=ok>已检测</span>' if cli_ok else '<span class=dim>未安装</span>')) + ' · Ollama ' + ('<span class=ok>运行中</span>' if oll_ok else '<span class=dim>未运行</span>') + '</p></div>')
+    p.append('<div class=card><h3>语音识别 · 转录接口</h3><p class=dim>默认走 MacWhisper 或 OpenAI Whisper。也可指向任意 OpenAI 兼容的转录接口（如 SiliconFlow 的 SenseVoice 做中文识别）：填 base_url + 选用哪个密钥 + 模型；base_url 留空即用 OpenAI 官方。注意：只有会返回分段时间码的接口才能得到精确字幕时间轴。</p>')
+    p.append('<form method=post><input type=hidden name=_csrf value=' + CSRF + '><input type=hidden name=form value=asr><table class=wrap>')
+    p.append('<tr><td>接口 base_url</td><td><input name=audio_base_url value=' + chr(39) + a_bu + chr(39) + ' placeholder=https://api.siliconflow.cn/v1 style=width:80%></td></tr>')
+    p.append('<tr><td>用哪个密钥</td><td><input name=audio_key value=' + chr(39) + a_key + chr(39) + ' style=width:40%> <span class=dim>对应钥匙串 ytrec-该名，如 openai / siliconflow</span></td></tr>')
+    p.append('<tr><td>转录模型</td><td><input name=api_model value=' + chr(39) + a_model + chr(39) + ' style=width:60%> <span class=dim>如 whisper-1 或 FunAudioLLM/SenseVoiceSmall</span></td></tr>')
+    p.append('</table><p><button class=primary>保存转录接口</button></p></form></div>')
+    return page('API', 'api', ''.join(p))
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -2314,52 +2422,7 @@ def settings():
 <p><button class=primary>保存全部设置</button></p></div>
 </form>
 
-<div class=card><h3>⑥ AI · 凭证与分工</h3>
-<p class=dim>本软件默认不含任何 API key——密钥由你添加，直接写入 macOS 钥匙串，不经过配置文件。除 API 外还支持两条本机渠道：Claude Code CLI（走你的 Claude 订阅额度，零 API 费）和 Ollama（本地模型，免费离线）。任一渠道可用即可运转，选了本机渠道失败时自动回落到已配置的 API。下面可以给每个 AI 环节分别指定用哪个渠道：</p>
-<form method=post style="margin-bottom:14px">
-<input type=hidden name=_csrf value={CSRF}>
-<input type=hidden name=form value=ai>
-<table class=wrap>
-<tr><td>整理成文用</td><td><select name=ai_article>
-<option value=auto {dsel('auto', cfg.get('ai.article','auto'))}>自动（用已配置的，优先 OpenAI）</option>
-<option value=openai {dsel('openai', cfg.get('ai.article','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.article','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.article','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.article','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
-<tr><td>截图召回用</td><td><select name=ai_visuals>
-<option value=auto {dsel('auto', cfg.get('ai.visuals','auto'))}>自动</option>
-<option value=openai {dsel('openai', cfg.get('ai.visuals','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.visuals','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.visuals','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.visuals','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
-<tr><td>OpenAI 模型</td><td>
-<select name=model_openai style="min-width:60%">{oai_opts}</select>
-<span class=dim>走 OpenAI 时使用</span></td></tr>
-<tr><td>Anthropic 模型</td><td>
-<select name=model_anthropic style="min-width:60%">{ant_opts}</select>
-<span class=dim>走 Anthropic 时使用</span></td></tr>
-<tr><td>Claude Code 模型</td><td>
-<select name=model_claude_cli style="min-width:60%">{cli_opts}</select>
-<span class=dim>走本机 Claude Code CLI 时使用（sonnet/opus/haiku 为官方别名）</span></td></tr>
-<tr><td>Ollama 模型</td><td>
-<select name=model_ollama style="min-width:60%">{oll_opts}</select>
-<span class=dim>走本地 Ollama 时使用；点"刷新模型列表"读取已安装模型</span></td></tr>
-<tr><td>模型列表</td><td>
-<button formaction=/ai/models formmethod=post>🔄 刷新模型列表</button>
-<span class=dim>用你的 key 从各家官方 API 拉取当前可用模型</span></td></tr>
-<tr><td>问 AI 用</td><td><select name=ai_qa>
-<option value=auto {dsel('auto', cfg.get('ai.qa','auto'))}>自动</option>
-<option value=openai {dsel('openai', cfg.get('ai.qa','auto'))}>OpenAI</option>
-<option value=anthropic {dsel('anthropic', cfg.get('ai.qa','auto'))}>Anthropic (Claude)</option><option value=claude_cli {dsel('claude_cli', cfg.get('ai.qa','auto'))}>Claude Code CLI（本机订阅额度，免 API 费）</option><option value=ollama {dsel('ollama', cfg.get('ai.qa','auto'))}>Ollama（本地模型，免费离线）</option></select></td></tr>
-</table>
-<p><button>保存分工</button></p></form>
-<p class=dim>密钥状态：
- openai {'<span class=ok>已配置</span>' if _key_status('openai') else '<span class=bad>未配置</span>'} ·
- anthropic {'<span class=ok>已配置</span>' if _key_status('anthropic') else '<span class=bad>未配置</span>'} ·
- Claude Code CLI {'<span class=bad>代理未运行（启动 CC Switch）</span>' if cli_warn else ('<span class=ok>已检测到</span>' if cli_ok else '<span class=bad>未安装</span>')} ·
- Ollama {'<span class=ok>运行中</span>' if oll_ok else '<span class=bad>未运行</span>'}</p>
-<form method=post>
-<input type=hidden name=_csrf value={CSRF}><input type=hidden name=form value=keys>
-<p><input type=password name=key_openai placeholder="OpenAI key（留空=不变）" style="width:60%"></p>
-<p><input type=password name=key_anthropic placeholder="Anthropic key（留空=不变）" style="width:60%"></p>
-<button>保存 key</button></form></div>
-"""
+<div class=card><h3>⑥ AI / API</h3><p class=dim>AI 凭证与分工、Qwen/Kimi、语音识别接口已移到独立的 <a href=/api>API 页</a>，让设置更清爽。</p></div>"""
     return page("设置", "settings", body)
 
 

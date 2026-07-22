@@ -103,15 +103,17 @@ def transcribe(cfg, con, video_id: str, audio_path: Path,
                duration_sec: float, work: Path) -> Path:
     """转译 audio_path，输出 transcript.original.srt 到 work，返回路径。"""
     from .creds import get_key
-    key = get_key("openai")
+    _kp = cfg.get("transcription.audio_key", "openai") or "openai"
+    key = get_key(_kp)
     if not key:
-        raise OpenAIAudioError("no openai key (Keychain: ytrec-openai)",
+        raise OpenAIAudioError(f"no {_kp} key (Keychain: ytrec-{_kp})",
                                transient=False)
     try:
         from openai import OpenAI
     except ImportError as e:
         raise OpenAIAudioError(f"openai import failed: {e}", transient=False)
-    client = OpenAI(api_key=key)
+    _base = cfg.get("transcription.audio_base_url", "") or ""
+    client = OpenAI(api_key=key, base_url=_base) if _base else OpenAI(api_key=key)
     model = cfg.get("transcription.api_model", "whisper-1")
     overlap = float(cfg.get("transcription.chunk_overlap_sec", 15))
     max_bytes = int(cfg.get("transcription.max_upload_mb", DEFAULT_MAX_MB)) * 1024 * 1024

@@ -15,10 +15,10 @@ _ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 def get_key(provider: str) -> str | None:
-    env = os.environ.get(_ENV.get(provider, ""))
+    env = os.environ.get(_ENV.get(provider, (provider or "").upper() + "_API_KEY"))
     if env:
         return env
-    service = _SERVICES.get(provider)
+    service = _SERVICES.get(provider) or (("ytrec-" + provider) if provider else None)
     if not service:
         return None
     try:

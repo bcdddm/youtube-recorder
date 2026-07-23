@@ -158,3 +158,36 @@ def test_group_prompts_feature():
     assert r.status_code == 200
     import youtube_recorder.config as cfg_mod
     assert (cfg_mod.load().get("groups.prompts") or {}).get("投资") == "结尾给跟踪建议"
+
+
+def test_tag_merge_interactive():
+    import json
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+    # 决策应用：'' = 独立（移除映射），非空 = 强制归属
+    tmap = {"AI 技术": "AI", "AI 芯片": "AI", "财报季": "财报"}
+    dec = {"AI 芯片": "", "宏观数据": "宏观"}
+    out = gui._apply_tag_decisions(tmap, dec)
+    assert "AI 芯片" not in out and out["宏观数据"] == "宏观" and out["AI 技术"] == "AI"
+    # answers 端点：写入 decisions 并更新 map
+    con = gui._con()
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) VALUES('UCtq','','t',1,?)", (dbm.now(),))
+    dbm.upsert_discovered(con, "tqvid01", "UCtq", "v", "2026-07-20T00:00:00Z")
+    con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES('tqvid01','wiki','/tmp/q.md','h',?)", (dbm.now(),))
+    con.commit(); con.close()
+    wd = work_dir("tqvid01"); wd.mkdir(parents=True, exist_ok=True)
+    (wd / "article.json").write_text(json.dumps(
+        {"tags": ["AI", "AI 芯片", "芯片"]}, ensure_ascii=False))
+    gui._tagmap_path().write_text(json.dumps(
+        {"map": {}, "decisions": {}, "tags": ["AI", "AI 芯片", "芯片"]},
+        ensure_ascii=False))
+    cli = gui.app.test_client()
+    r = cli.post("/tags/merge/answers", data={
+        "_csrf": gui.CSRF,
+        "answers": json.dumps({"AI 芯片": "芯片", "bogus": "AI"})})
+    d = r.get_json()
+    assert d["ok"] and d["applied"] == 1
+    saved = json.loads(gui._tagmap_path().read_text())
+    assert saved["decisions"]["AI 芯片"] == "芯片"
+    assert saved["map"]["AI 芯片"] == "芯片"

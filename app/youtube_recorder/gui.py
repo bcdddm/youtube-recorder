@@ -649,6 +649,13 @@ EN_MAP = [
      'Keys go straight into the macOS Keychain, never config files. Supports OpenAI / Anthropic / Qwen / Kimi cloud APIs plus the local Claude Code CLI and Ollama. Assign a channel per stage; local channels fall back to configured APIs on failure.'),
     ('SiliconFlow（中文语音识别）', 'SiliconFlow (Chinese speech recognition)'),
     ('代理未运行', 'proxy down'),
+    ('🏷 AI 想跟你确认几个标签', '🏷 The AI wants to confirm a few tags with you'),
+    ('你的选择会被记住，并让之后的归并更精准。', 'Your choices are remembered and make future merges more accurate.'),
+    ('应用我的选择', 'Apply my choices'),
+    ('应归入哪个标签？', 'should merge into which tag?'),
+    ('已应用 ', 'Applied '),
+    (' 条人工决定', ' manual decision(s)'),
+    ('独立', 'keep separate'),
 ]
 
 
@@ -1494,12 +1501,17 @@ def reports_json():
     return jsonify(out)
 
 
-TAGMERGE_SYSTEM = """你是标签归并助手。给你一组文章标签（JSON 数组）。把意思相同或属于同一主题家族的标签分组合并，每组选一个规范名。
+TAGMERGE_SYSTEM = """你是标签归并助手。给你 JSON：{"tags":[全部标签], "confirmed":{标签:用户已确认的归属}}。
+把意思相同或属于同一主题家族的标签分组合并，每组选一个规范名。
 规则：
 - 规范名选组内最短、最通用的（例：AI、AI 技术、AI 投资 → AI；财报、财报季、财报分析 → 财报）。
-- 只合并确实同义或同一主题家族的标签，拿不准就不合并。
-- 未出现在任何组里的标签保持原样。
-只输出 JSON：{"groups":[{"canon":"AI","alts":["AI 技术","AI 投资"]}]}"""
+- confirmed 是用户此前的人工决定，必须严格遵守：值为规范名则该标签必须归入该组；值为 "独立" 则该标签不得被合并、也不得作为你提问的对象。
+- 只合并你有把握的；**对拿不准的标签不要合并，改为向用户提问**（最多 5 题）：
+  每题针对一个标签，options 只能是当前标签集合里的规范名候选，外加 "独立"。
+- 未出现在任何组里且未提问的标签保持原样。
+只输出 JSON：
+{"groups":[{"canon":"AI","alts":["AI 技术","AI 投资"]}],
+ "questions":[{"tag":"AI 芯片","question":"「AI 芯片」应归入哪个标签？","options":["AI","芯片","独立"]}]}"""
 
 
 def _tagmap_path():
@@ -1507,12 +1519,28 @@ def _tagmap_path():
     return APP_SUPPORT / "tags-merge.json"
 
 
-def _load_tagmap() -> dict:
+def _load_tagfile() -> dict:
     try:
         import json as _j
-        return _j.loads(_tagmap_path().read_text(encoding="utf-8")).get("map", {})
+        return _j.loads(_tagmap_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _load_tagmap() -> dict:
+    return _load_tagfile().get("map", {})
+
+
+def _apply_tag_decisions(tmap: dict, decisions: dict) -> dict:
+    """用户人工决定优先于 AI：'' = 保持独立（从 map 移除）；否则强制指向所选规范名。"""
+    out = {a: c for a, c in tmap.items() if decisions.get(a, None) != ""}
+    for tag, canon in decisions.items():
+        if canon:
+            out[tag] = canon
+        else:
+            out.pop(tag, None)
+    # 防环/防链
+    return {a: c for a, c in out.items() if c not in out and a != c}
 
 
 def _merge_tags(tags, tmap):
@@ -1550,12 +1578,18 @@ def tags_merge():
     con.close()
     if len(tags) < 2:
         return {"ok": True, "merged": 0, "total": len(tags)}
+    decisions = _load_tagfile().get("decisions", {})
+    decisions = {k: v for k, v in decisions.items() if k in set(tags)}
     try:
+        payload = {"tags": tags,
+                   "confirmed": {k: (v or "独立") for k, v in decisions.items()}}
         raw = providers.complete(cfg_mod.load(), None, "tag-merge",
                                  TAGMERGE_SYSTEM,
-                                 _j.dumps(tags, ensure_ascii=False),
-                                 max_tokens=2000, purpose="report_qa").strip()
-        groups = _j.loads(raw[raw.index("{"):raw.rindex("}") + 1]).get("groups", [])
+                                 _j.dumps(payload, ensure_ascii=False),
+                                 max_tokens=2500, purpose="report_qa").strip()
+        parsed = _j.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+        groups = parsed.get("groups", [])
+        questions = parsed.get("questions", [])
     except Exception as e:
         return {"ok": False, "error": str(e)[:200]}, 502
     tmap = {}
@@ -1568,12 +1602,62 @@ def tags_merge():
             a = (a or "").strip()
             if a and a != canon and a in tagset:
                 tmap[a] = canon
-    # 防环/防链：canon 本身不允许再指向别处
-    tmap = {a: c for a, c in tmap.items() if c not in tmap}
+    tmap = _apply_tag_decisions(tmap, decisions)
+    # 清洗问题：标签必须真实存在、未被人工决定过；选项限于真实标签 + 独立
+    qs = []
+    for q in questions if isinstance(questions, list) else []:
+        t = (q.get("tag") or "").strip()
+        if not t or t not in tagset or t in decisions:
+            continue
+        opts = [o for o in (q.get("options") or [])
+                if isinstance(o, str) and (o == "独立" or o in tagset) and o != t]
+        if "独立" not in opts:
+            opts.append("独立")
+        if len(opts) < 2:
+            continue
+        qs.append({"tag": t,
+                   "question": (q.get("question") or
+                                "「" + t + "」应归入哪个标签？")[:120],
+                   "options": opts[:6]})
+        if len(qs) >= 5:
+            break
     _tagmap_path().write_text(_j.dumps(
-        {"map": tmap, "made": dbm.now(), "tags": tags},
+        {"map": tmap, "decisions": decisions, "made": dbm.now(), "tags": tags},
         ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"ok": True, "merged": len(tmap), "total": len(tags)}
+    return {"ok": True, "merged": len(tmap), "total": len(tags), "questions": qs}
+
+
+@app.post("/tags/merge/answers")
+def tags_merge_answers():
+    check_csrf()
+    import json as _j
+    try:
+        answers = _j.loads(request.form.get("answers", "{}"))
+        assert isinstance(answers, dict)
+    except Exception:
+        return {"ok": False, "error": "bad answers"}, 400
+    con = _con()
+    tagset = set(_all_article_tags(con))
+    con.close()
+    data = _load_tagfile()
+    tmap = data.get("map", {})
+    decisions = data.get("decisions", {})
+    applied = 0
+    for tag, choice in list(answers.items())[:20]:
+        if not isinstance(tag, str) or tag not in tagset:
+            continue
+        if choice == "独立" or choice == "":
+            decisions[tag] = ""
+            applied += 1
+        elif isinstance(choice, str) and choice in tagset and choice != tag:
+            decisions[tag] = choice
+            applied += 1
+    tmap = _apply_tag_decisions(tmap, decisions)
+    _tagmap_path().write_text(_j.dumps(
+        {"map": tmap, "decisions": decisions, "made": dbm.now(),
+         "tags": data.get("tags", sorted(tagset))},
+        ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"ok": True, "applied": applied, "merged": len(tmap)}
 
 
 def _digest_note_text(note_path, limit=6000):
@@ -1992,10 +2076,56 @@ async function mergeTags() {
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:'_csrf=' + CSRF_T});
     const d = await r.json();
-    if (d.ok) { b.textContent = `已合并 ${d.merged} 个同义标签（共 ${d.total} 个）`; await reloadData(); }
+    if (d.ok) {
+      b.textContent = `已合并 ${d.merged} 个同义标签（共 ${d.total} 个）`;
+      await reloadData();
+      if (d.questions && d.questions.length) { showTagQuiz(d.questions); return; }
+    }
     else b.textContent = '归并失败：' + (d.error || '');
   } catch (e) { b.textContent = '归并失败'; }
   setTimeout(() => { b.textContent = '🏷 AI 归并同义标签'; b.disabled = false; }, 5000);
+}
+function showTagQuiz(qs) {
+  const old = document.getElementById('tagquiz'); if (old) old.remove();
+  const div = document.createElement('div');
+  div.id = 'tagquiz'; div.className = 'card';
+  div.style.cssText = 'position:fixed;right:24px;bottom:24px;max-width:380px;' +
+    'z-index:50;box-shadow:0 12px 36px rgba(0,0,0,.35);max-height:70vh;overflow-y:auto';
+  let h = '<h3 style="margin-top:0">🏷 AI 想跟你确认几个标签</h3>' +
+    '<p class=dim style="margin:2px 0 10px">你的选择会被记住，并让之后的归并更精准。</p>';
+  qs.forEach((q, i) => {
+    h += '<p style="margin:8px 0 4px"><b>' + esc(q.question) + '</b></p>';
+    q.options.forEach(o => {
+      h += '<label style="display:inline-block;margin:2px 10px 2px 0">' +
+        '<input type=radio name=tq' + i + ' value="' + esc(o) + '"> ' + esc(o) + '</label>';
+    });
+  });
+  h += '<p style="margin-top:12px"><button class=primary onclick="submitTagQuiz()">应用我的选择</button> ' +
+    '<button id=tqskip>跳过</button></p>';
+  div.innerHTML = h;
+  div.dataset.qs = JSON.stringify(qs);
+  document.body.appendChild(div);
+  div.querySelector('#tqskip').onclick = () => div.remove();
+}
+async function submitTagQuiz() {
+  const div = document.getElementById('tagquiz');
+  const qs = JSON.parse(div.dataset.qs);
+  const answers = {};
+  qs.forEach((q, i) => {
+    const sel = div.querySelector('input[name=tq' + i + ']:checked');
+    if (sel) answers[q.tag] = sel.value;
+  });
+  if (!Object.keys(answers).length) { div.remove(); return; }
+  try {
+    const r = await fetch('/tags/merge/answers', {method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'_csrf=' + CSRF_T + '&answers=' + encodeURIComponent(JSON.stringify(answers))});
+    const d = await r.json();
+    const b = document.getElementById('mtbtn');
+    if (d.ok) { b.textContent = '已应用 ' + d.applied + ' 条人工决定'; await reloadData(); }
+    setTimeout(() => { b.textContent = '🏷 AI 归并同义标签'; b.disabled = false; }, 5000);
+  } catch (e) {}
+  div.remove();
 }
 (async () => {
   DATA = await (await fetch('/reports.json')).json();

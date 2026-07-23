@@ -118,12 +118,16 @@ REQUIRED_KEYS = ("title_zh", "one_sentence", "summary", "sections", "takeaways",
 
 
 def compose_article(cfg, con, video_id: str, video_title: str,
-                    channel: str, notes: list[dict]) -> dict:
+                    channel: str, notes: list[dict],
+                    group_prompt: str = "") -> dict:
     system = COMPOSE_SYSTEM
     custom = (cfg.get("article.custom_prompt") or "").strip()
     if custom:
         system += ("\n\n用户附加要求（在不违反上述忠实性规则的前提下遵守）：\n"
                    + custom)
+    if group_prompt:
+        system += ("\n\n所属组的个性化要求（在不违反忠实性规则的前提下遵守）：\n"
+                   + group_prompt)
     user = (f"视频标题：{video_title}\n频道：{channel}\n\n分块笔记：\n"
             + json.dumps(notes, ensure_ascii=False))
     reply = providers.complete(cfg, con, video_id, system, user,
@@ -238,8 +242,12 @@ def _punctuate_sections(cfg, con, video_id: str, sections: list) -> int:
     return changed
 
 
-def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
+def _verbatim_sections(cfg, con, video_id, can, chunks, pct,
+                       group_prompt: str = ""):
     """选句式生成：AI 只挑句+写过渡，原句程序拷贝（含确定性清洗）→ 保留率硬保证。"""
+    _gp_suffix = (("\n\n所属组的个性化要求（选句与小节标题可参考，"
+                   "但不得违反逐字保留与忠实性规则）：\n" + group_prompt)
+                  if group_prompt else "")
     seg_by_id = {s.segment_id: s for s in can.segments}
     cleaned = {s.segment_id: _clean_quote(s.text) for s in can.segments}
     sections = []
@@ -261,7 +269,7 @@ def _verbatim_sections(cfg, con, video_id, can, chunks, pct):
         try:
             reply = providers.complete(
                 cfg, con, video_id,
-                SELECT_SYSTEM.format(pct=pct, order_rule=order_rule),
+                SELECT_SYSTEM.format(pct=pct, order_rule=order_rule) + _gp_suffix,
                 lines[:14000], max_tokens=2000, purpose="chunk_notes")
             sel = providers.extract_json(reply)
         except Exception:
@@ -385,12 +393,36 @@ def proofread_sections(cfg, con, video_id: str, sections: list) -> int:
     return applied
 
 
+def group_prompt_for(cfg, con, channel_id: str | None) -> str:
+    """按视频所属频道的组，拼出带组名标注的个性化 prompt（可属多组）。"""
+    if not con or not channel_id:
+        return ""
+    prompts = cfg.get("groups.prompts") or {}
+    if not prompts:
+        return ""
+    try:
+        row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
+                          (channel_id,)).fetchone()
+    except Exception:
+        return ""
+    if not row or not row["grp"]:
+        return ""
+    parts = []
+    for g in sorted({x.strip() for x in row["grp"].split(",") if x.strip()}):
+        p = (prompts.get(g) or "").strip()
+        if p:
+            parts.append(f"【组：{g}】{p}")
+    return "\n".join(parts)
+
+
 def generate(cfg, con, video_id: str, can: Canonical,
-             video_title: str, channel: str) -> dict:
+             video_title: str, channel: str,
+             group_prompt: str = "") -> dict:
     chunks = chunk_transcript(can)
     pct = int(cfg.get("article.verbatim_pct", 70) or 0)
     if pct >= 40:
-        sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct)
+        sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct,
+                                             group_prompt=group_prompt)
         sample = "\n".join(
             f"## {s['heading']}\n{s['body'][:200]}" for s in sections)[:8000]
         try:
@@ -413,7 +445,8 @@ def generate(cfg, con, video_id: str, can: Canonical,
         }
     else:
         notes = analyze_chunks(cfg, con, video_id, chunks)
-        art = compose_article(cfg, con, video_id, video_title, channel, notes)
+        art = compose_article(cfg, con, video_id, video_title, channel, notes,
+                              group_prompt=group_prompt)
     if pct >= 40 and cfg.get("article.punctuation", "ai") == "ai":
         art["punctuated"] = _punctuate_sections(cfg, con, video_id,
                                                 art.get("sections", []))

@@ -127,3 +127,34 @@ def test_channels_export_import_roundtrip():
     assert set(gui._grps_of(a["grp"])) == {"投资", "科技", "宏观"}
     assert con.execute("SELECT COUNT(*) n FROM channels WHERE channel_id='bogus'").fetchone()["n"] == 0
     con.close()
+
+
+def test_group_prompts_feature():
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm, article as art_mod
+    from youtube_recorder.config import Config, DEFAULT_CONFIG
+    import copy
+    # group_prompt_for: labeled, multi-group, missing prompts skipped
+    con = gui._con()
+    con.execute("DELETE FROM channels WHERE channel_id='UCgp0000000000000000001'")
+    dbm.add_channel(con, "UCgp0000000000000000001", "https://x", "组测试")
+    con.execute("UPDATE channels SET grp='投资,科技' WHERE channel_id='UCgp0000000000000000001'")
+    con.commit()
+    cfg = Config(copy.deepcopy(DEFAULT_CONFIG))
+    cfg.data["groups"]["prompts"] = {"投资": "偏重政策影响", "新闻": "无关"}
+    gp = art_mod.group_prompt_for(cfg, con, "UCgp0000000000000000001")
+    assert gp == "【组：投资】偏重政策影响"
+    assert art_mod.group_prompt_for(cfg, con, None) == ""
+    con.close()
+    # digest cache path varies with prompt hash
+    p0 = gui._digest_cache_path2("2026-07-21", "投资", "")
+    p1 = gui._digest_cache_path2("2026-07-21", "投资", "abcd1234")
+    assert p0.name != p1.name and p1.name.startswith("abcd1234__")
+    # API page POST saves prompts
+    cli = gui.app.test_client()
+    r = cli.post("/api", data={"_csrf": gui.CSRF, "form": "gprompts",
+                               "gname_0": "投资", "gp_0": "结尾给跟踪建议",
+                               "gname_1": "科技", "gp_1": ""})
+    assert r.status_code == 200
+    import youtube_recorder.config as cfg_mod
+    assert (cfg_mod.load().get("groups.prompts") or {}).get("投资") == "结尾给跟踪建议"

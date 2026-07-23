@@ -599,6 +599,56 @@ EN_MAP = [
     ('未运行', 'not running'),
     ('除 API 外还支持两条本机渠道：Claude Code CLI（走你的 Claude 订阅额度，零 API 费）和 Ollama（本地模型，免费离线）。任一渠道可用即可运转，选了本机渠道失败时自动回落到已配置的 API。下面可以给每个 AI 环节分别指定用哪个渠道：', 'Besides APIs, two local channels are supported: the Claude Code CLI (uses your Claude subscription quota, zero API cost) and Ollama (local models, free & offline). Any one working channel is enough; if a local channel fails it falls back to your configured APIs. Assign a channel per AI stage below:'),
     ('代理未运行（启动 CC Switch）', 'proxy down (start CC Switch)'),
+    ('显示引用：开', 'Citations: on'),
+    ('显示引用：关', 'Citations: off'),
+    ('⧉ 复制', '⧉ Copy'),
+    ('✓ 已复制', '✓ Copied'),
+    ('复制失败', 'Copy failed'),
+    ('基于组的总结和改写个性化', 'Group-based summary & rewrite personalization'),
+    ('给每个组一条 prompt：该组频道的<b>单篇改写</b>和含该组文章的<b>当日汇总</b>生成时都会注入，并标注来源组（如【组：投资】）。忠实性规则（不编造事实、不因此漏要点）始终优先；留空 = 该组无个性化。改动后旧日报缓存自动失效、按需重新生成。',
+     'One prompt per group: injected into <b>single-article rewrites</b> for that group\'s channels and into <b>daily digests</b> containing its articles, labeled with the group name. Faithfulness rules (no invented facts, no dropped points) always win; blank = no personalization. Changing a prompt invalidates old digest caches automatically.'),
+    ('还没有任何组——先在 Channels 页给频道分组。', 'No groups yet — group your channels on the Channels page first.'),
+    ('例：偏重政策与宏观影响；结尾给出对该主题的跟踪建议', 'E.g.: emphasize policy and macro impact; end with follow-up suggestions'),
+    ('保存组个性化', 'Save group personalization'),
+    ('组个性化已保存', 'Group personalization saved'),
+    ('订阅 · 导入 / 导出', 'Subscriptions · import / export'),
+    ('重新运行', 'Re-run'),
+    ('⚠ 已卡在此步 ', '⚠ Stuck here for '),
+    (' 分钟，可点重新运行', ' min — click Re-run'),
+    ('播放', 'Play'),
+    ('放大/画中画', 'Zoom / PiP'),
+    ('在浏览器打开', 'Open in browser'),
+    ('反馈', 'Feedback'),
+    ("已用 '+sec+' 秒", "elapsed '+sec+' s"),
+    ("上次用了约 '+last+' 秒", "last time ~'+last+' s"),
+    ('首次生成，通常 10–40 秒', 'first run usually takes 10–40 s'),
+    ('如 whisper-1 或 FunAudioLLM/SenseVoiceSmall', 'e.g. whisper-1 or FunAudioLLM/SenseVoiceSmall'),
+    ('对应钥匙串 ytrec-该名，如 openai / siliconflow', 'matches Keychain item ytrec-<name>, e.g. openai / siliconflow'),
+    ('B站 space.bilibili.com/UID / 播客 RSS', 'Bilibili space.bilibili.com/UID / podcast RSS'),
+    ('AI 凭证与分工、Qwen/Kimi、语音识别接口已移到独立的', 'AI credentials & routing, Qwen/Kimi and the speech-recognition endpoint now live on the dedicated'),
+    ('，让设置更清爽。', ' — keeps Settings lean.'),
+    ('API 页', 'API page'),
+    ('（订阅额度，免 API 费）', ' (subscription quota, no API cost)'),
+    ('（本地，免费离线）', ' (local, free & offline)'),
+    ('接口 base_url', 'Endpoint base_url'),
+    ('语音识别 · 转录接口', 'Speech recognition · transcription endpoint'),
+    ('凭证与分工', 'Credentials & routing'),
+    ('用哪个密钥', 'Which key'),
+    ('转录模型', 'Transcription model'),
+    ('保存密钥', 'Save keys'),
+    ('保存转录接口', 'Save transcription endpoint'),
+    ('本机渠道：Claude Code CLI', 'Local channels: Claude Code CLI'),
+    ('已检测', 'detected'),
+    (' key（留空=不变）', ' key (blank = unchanged)'),
+    ('Qwen 模型', 'Qwen model'),
+    ('Kimi 模型', 'Kimi model'),
+    ('模型', 'Model'),
+    ('默认走 MacWhisper 或 OpenAI Whisper。也可指向任意 OpenAI 兼容的转录接口（如 SiliconFlow 的 SenseVoice 做中文识别）：填 base_url + 选用哪个密钥 + 模型；base_url 留空即用 OpenAI 官方。注意：只有会返回分段时间码的接口才能得到精确字幕时间轴。',
+     'Defaults to MacWhisper or OpenAI Whisper. You can also point to any OpenAI-compatible transcription endpoint (e.g. SiliconFlow SenseVoice for Chinese): set base_url + which key + model; blank base_url = official OpenAI. Note: only endpoints that return segment timecodes give a precise subtitle timeline.'),
+    ('密钥写入 macOS 钥匙串，不经过配置文件。支持 OpenAI / Anthropic / Qwen 通义千问 / Kimi 月之暗面 云端 API，以及本机 Claude Code CLI、Ollama。可给每个环节分别指定渠道，选本机渠道失败时自动回落到已配置的 API。',
+     'Keys go straight into the macOS Keychain, never config files. Supports OpenAI / Anthropic / Qwen / Kimi cloud APIs plus the local Claude Code CLI and Ollama. Assign a channel per stage; local channels fall back to configured APIs on failure.'),
+    ('SiliconFlow（中文语音识别）', 'SiliconFlow (Chinese speech recognition)'),
+    ('代理未运行', 'proxy down'),
 ]
 
 
@@ -1570,6 +1620,13 @@ def _digest_cache_path(date: str, grp: str):
     return d / (_h.sha256(key.encode()).hexdigest()[:16] + "__" + date + ".md")
 
 
+def _digest_cache_path2(date: str, grp: str, extra: str):
+    p = _digest_cache_path(date, grp)
+    if not extra:
+        return p
+    return p.with_name(extra + "__" + p.name)
+
+
 def _digest_timing_path():
     from .paths import APP_SUPPORT
     return APP_SUPPORT / "digest-timing.json"
@@ -1589,8 +1646,6 @@ def reports_digest():
     date = request.form.get("date", "")[:10]
     grp = request.form.get("grp", "").strip()
     force = request.form.get("force") == "1"
-    cache = _digest_cache_path(date, grp)
-    cached = cache.exists() and not force
     con = _con()
     rows = con.execute(
         "SELECT w.video_id, w.note_path, v.title, v.published_at, "
@@ -1601,6 +1656,7 @@ def reports_digest():
     import json as _json
     from .paths import work_dir
     items = []
+    item_grps = set()
     for r in rows:
         if dbm.local_date(r["published_at"]) != date:
             continue
@@ -1617,6 +1673,7 @@ def reports_digest():
                 meta = _json.loads(aj.read_text(encoding="utf-8"))
         except Exception:
             pass
+        item_grps.update(_grps_of(r["cgrp"]))
         items.append({
             "vid": r["video_id"],
             "title": meta.get("title_zh") or r["title"] or r["video_id"],
@@ -1634,6 +1691,18 @@ def reports_digest():
                 + (('组「' + escape(grp) + '」') if grp else '')
                 + '没有可汇总的文章。</p></div>')
         return page("日报", "reports", body)
+    # 基于组的总结个性化：作用域组（未选组时=当日文章实际所属的组）
+    _cfg0 = cfg_mod.load()
+    _gp_map = _cfg0.get("groups.prompts") or {}
+    _scope_gs = (sorted({x.strip() for x in grp.split(",") if x.strip()})
+                 if grp else sorted(item_grps))
+    gp_text = "\n".join(
+        "【组：" + g + "】" + (_gp_map.get(g) or "").strip()
+        for g in _scope_gs if (_gp_map.get(g) or "").strip())
+    import hashlib as _hh
+    _extra = _hh.sha1(gp_text.encode("utf-8")).hexdigest()[:8] if gp_text else ""
+    cache = _digest_cache_path2(date, grp, _extra)
+    cached = cache.exists() and not force
     from . import providers
     import json as _j
     if cached:
@@ -1644,8 +1713,12 @@ def reports_digest():
         import time as _time
         _t0 = _time.time()
         try:
+            _dsys = DIGEST_SYSTEM.format(date=date)
+            if gp_text:
+                _dsys += ("\n\n各组的个性化要求（只作用于对应组的文章；"
+                          "不得虚构，不得因此遗漏要点）：\n" + gp_text)
             md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
-                                    DIGEST_SYSTEM.format(date=date), user,
+                                    _dsys, user,
                                     max_tokens=5000, purpose="report_qa")
             cache.write_text(md, encoding="utf-8")
             import json as _jt
@@ -1653,6 +1726,9 @@ def reports_digest():
         except Exception as e:
             md = f"生成失败：{e}"
     html = _md_to_html(md, "digest")
+    import re as _re
+    html = _re.sub(r"【([^】\n]{1,80})】",
+                   r'<span class=cite>【\1】</span>', html)
     refs = "".join(
         '<li><a href="/reports/' + str(escape(it["vid"]))
         + '" style="color:var(--acc)">' + str(escape(it["title"]))
@@ -1667,14 +1743,54 @@ def reports_digest():
              f'<input type=hidden name=date value="{escape(date)}">'
              f'<input type=hidden name=grp value="{escape(grp)}">'
              f'<input type=hidden name=force value=1>'
-             f'<button style="font-size:12px;padding:2px 10px">♻ 重新生成</button></form>')
+             f'<button style="font-size:12px;padding:2px 10px">♻ 重新生成</button></form>'
+             f'<button style="font-size:12px;padding:2px 10px;margin-left:8px" id=citebtn'
+             f' onclick="toggleCites()">显示引用：开</button>'
+             f'<button style="font-size:12px;padding:2px 10px;margin-left:8px"'
+             f' onclick="copyDigest(this)">⧉ 复制</button>')
     body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
             f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
             f' · 共 {len(items)} 篇</span>{cache_note}{regen}'
             f'<div class=md>{html}</div>'
             f'<div class=md style="margin-top:18px"><h2>引用来源</h2>'
-            f'<ol>{refs}</ol></div></div>')
+            f'<ol>{refs}</ol></div></div>'
+            + _DIGEST_TOOLS_JS.replace("__RAWMD__", _j.dumps(md)))
     return page("日报", "reports", body)
+
+
+_DIGEST_TOOLS_JS = """
+<style>body.nocite .cite{display:none}</style>
+<script>
+const RAWMD = __RAWMD__;
+function _syncCiteBtn() {
+  const off = document.body.classList.contains('nocite');
+  document.getElementById('citebtn').textContent = off ? '显示引用：关' : '显示引用：开';
+}
+function toggleCites() {
+  document.body.classList.toggle('nocite');
+  try { localStorage.setItem('ytrec-nocite',
+        document.body.classList.contains('nocite') ? '1' : ''); } catch(e) {}
+  _syncCiteBtn();
+}
+try { if (localStorage.getItem('ytrec-nocite') === '1')
+        document.body.classList.add('nocite'); } catch(e) {}
+_syncCiteBtn();
+async function copyDigest(btn) {
+  let text = RAWMD;
+  if (document.body.classList.contains('nocite'))
+    text = text.replace(/【[^】\n]{1,80}】/g, '');
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; }
+  catch(e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand('copy'); } catch(e2) {}
+    ta.remove();
+  }
+  btn.textContent = ok ? '✓ 已复制' : '复制失败';
+  setTimeout(() => { btn.textContent = '⧉ 复制'; }, 2500);
+}
+</script>"""
 
 
 @app.route("/reports/bulk-delete", methods=["POST"])
@@ -2094,6 +2210,24 @@ def api_page():
             except cfg_mod.ConfigError as e:
                 msg = '<span class=bad>' + esc(str(e)) + '</span>'
             cfg = cfg_mod.load()
+        elif f.get('form') == 'gprompts':
+            gpm = dict(cfg.get('groups.prompts') or {})
+            i = 0
+            while f.get('gname_' + str(i)) is not None:
+                g = f.get('gname_' + str(i), '').strip()
+                v = f.get('gp_' + str(i), '').strip()[:2000]
+                if g:
+                    if v:
+                        gpm[g] = v
+                    else:
+                        gpm.pop(g, None)
+                i += 1
+            cfg.data.setdefault('groups', {})['prompts'] = gpm
+            try:
+                cfg_mod.save(cfg); msg = '<span class=ok>组个性化已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = '<span class=bad>' + esc(str(e)) + '</span>'
+            cfg = cfg_mod.load()
         elif f.get('form') == 'keys':
             for prov in ('openai', 'anthropic', 'qwen', 'kimi', 'siliconflow'):
                 val = f.get('key_' + prov, '').strip()
@@ -2146,6 +2280,30 @@ def api_page():
     p.append('<tr><td>用哪个密钥</td><td><input name=audio_key value=' + chr(39) + a_key + chr(39) + ' style=width:40%> <span class=dim>对应钥匙串 ytrec-该名，如 openai / siliconflow</span></td></tr>')
     p.append('<tr><td>转录模型</td><td><input name=api_model value=' + chr(39) + a_model + chr(39) + ' style=width:60%> <span class=dim>如 whisper-1 或 FunAudioLLM/SenseVoiceSmall</span></td></tr>')
     p.append('</table><p><button class=primary>保存转录接口</button></p></form></div>')
+    # 基于组的总结和改写个性化
+    con_g = _con()
+    _all_gs = sorted({x.strip() for (row,) in con_g.execute(
+        "SELECT grp FROM channels WHERE grp IS NOT NULL AND grp!=''").fetchall()
+        for x in (row or "").split(",") if x.strip()})
+    con_g.close()
+    _gpm = cfg.get('groups.prompts') or {}
+    p.append('<div class=card><h3>基于组的总结和改写个性化</h3>')
+    p.append('<p class=dim>给每个组一条 prompt：该组频道的<b>单篇改写</b>和含该组文章的'
+             '<b>当日汇总</b>生成时都会注入，并标注来源组（如【组：投资】）。'
+             '忠实性规则（不编造事实、不因此漏要点）始终优先；'
+             '留空 = 该组无个性化。改动后旧日报缓存自动失效、按需重新生成。</p>')
+    if not _all_gs:
+        p.append('<p class=dim>还没有任何组——先在 Channels 页给频道分组。</p></div>')
+    else:
+        p.append('<form method=post><input type=hidden name=_csrf value=' + CSRF
+                 + '><input type=hidden name=form value=gprompts>')
+        for i, g in enumerate(_all_gs):
+            p.append('<p><b>' + esc(g) + '</b><input type=hidden name=gname_'
+                     + str(i) + ' value=' + chr(39) + esc(g) + chr(39) + '><br>'
+                     '<textarea name=gp_' + str(i) + ' rows=2 style="width:96%" '
+                     'placeholder="例：偏重政策与宏观影响；结尾给出对该主题的跟踪建议">'
+                     + esc(_gpm.get(g, '')) + '</textarea></p>')
+        p.append('<button class=primary>保存组个性化</button></form></div>')
     return page('API', 'api', ''.join(p))
 
 
@@ -2318,7 +2476,7 @@ def settings():
 2. 本软件默认不内置任何 API key，需要你自己添加（见第 ⑥ 节）/ No API key ships by default — add your own in section ⑥.<br>
 3. 各 AI 环节可分别指定使用哪个 API（也在第 ⑥ 节）/ Each AI stage can use a different provider — also in section ⑥.</p></div>
 
-<div class=card><h3>訂閱 · 導入 / 導出</h3><div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<div class=card><h3>订阅 · 导入 / 导出</h3><div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
 <button type=button onclick="location.href='/channels/export'">⬇ 导出订阅</button>
 <form method=post action=/channels/import enctype="multipart/form-data"
  style="display:flex;gap:6px;align-items:center;margin:0">

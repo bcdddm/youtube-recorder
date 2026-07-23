@@ -304,7 +304,9 @@ def process_articles(con, cfg, log, stats: RunStats) -> None:
         aid = dbm.start_attempt(con, vid, "article")
         try:
             art = art_mod.generate(cfg, con, vid, can,
-                                   v["title"] or "", ch["name"] if ch else "")
+                                   v["title"] or "", ch["name"] if ch else "",
+                                   group_prompt=art_mod.group_prompt_for(
+                                       cfg, con, v["channel_id"]))
         except ProviderError as e:
             dbm.end_attempt(con, aid, "error", error_code="provider", detail=str(e))
             kind = st.RETRY_TRANSIENT if e.transient else st.RETRY_RESOURCE

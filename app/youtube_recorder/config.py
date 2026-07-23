@@ -114,6 +114,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_failed_work_days": 30,
         "keep_original_transcript": "forever",
     },
+    "groups": {
+        # 基于组的总结/改写个性化：{组名: prompt}。多篇日报与单篇改写时注入，
+        # 并标注来源组；忠实性规则（不编造事实）始终优先。
+        "prompts": {},
+    },
     "budget": {
         "max_monthly_cloud_usd": 20.0,
     },
@@ -211,6 +216,12 @@ def validate(data: dict[str, Any]) -> list[str]:
     check("vault.layout",
           data.get("vault", {}).get("layout", "vault") in VALID_LAYOUTS,
           f"must be one of {VALID_LAYOUTS}")
+
+    gp = data.get("groups", {}).get("prompts", {})
+    check("groups.prompts",
+          isinstance(gp, dict) and all(
+              isinstance(k, str) and isinstance(v, str) for k, v in gp.items()),
+          "must be a mapping of group name -> prompt text")
 
     root = data.get("vault", {}).get("root", "")
     if root:

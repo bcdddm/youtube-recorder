@@ -230,7 +230,24 @@ def validate(data: dict[str, Any]) -> list[str]:
     return errors
 
 
+_LOAD_CACHE: dict = {}
+
+
 def load(path: Path = CONFIG_FILE) -> Config:
+    """带 mtime 缓存：同一文件未变更时不重复读盘/解析/校验。"""
+    try:
+        mt = path.stat().st_mtime_ns
+    except OSError:
+        mt = None
+    hit = _LOAD_CACHE.get(str(path))
+    if hit is not None and hit[0] == mt:
+        return hit[1]
+    cfg = _load_uncached(path)
+    _LOAD_CACHE[str(path)] = (mt, cfg)
+    return cfg
+
+
+def _load_uncached(path: Path = CONFIG_FILE) -> Config:
     if path.exists():
         with open(path, encoding="utf-8") as f:
             user_data = yaml.safe_load(f) or {}
@@ -256,6 +273,7 @@ def save(cfg: Config, path: Path = CONFIG_FILE) -> None:
             yaml.safe_dump(cfg.data, f, allow_unicode=True, sort_keys=False)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)  # atomic
+        _LOAD_CACHE.pop(str(path), None)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)

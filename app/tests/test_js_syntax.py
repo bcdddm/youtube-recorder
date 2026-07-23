@@ -39,7 +39,22 @@ def test_all_page_scripts_parse():
             assert r.returncode == 0, f"{page} script#{i}: {r.stderr[:300]}"
 
 
+def test_digest_tools_js():
+    """日报页附加脚本必须能通过 node --check（防转义事故复发）。"""
+    import re, subprocess, tempfile
+    import youtube_recorder.gui as gui
+    s = re.search(r"<script>(.*?)</script>", gui._DIGEST_TOOLS_JS, re.S).group(1)
+    s = s.replace("__RAWMD__", '"x"')
+    p = tempfile.mktemp(suffix=".js")
+    open(p, "w").write(s)
+    r = subprocess.run(["node", "--check", p], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+
 if __name__ == "__main__":
     test_all_page_scripts_parse()
     print("ok  test_all_page_scripts_parse")
+    test_digest_tools_js()
+    print("ok  test_digest_tools_js")
     print("all JS syntax tests passed")

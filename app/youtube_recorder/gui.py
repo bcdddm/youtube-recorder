@@ -652,10 +652,16 @@ EN_MAP = [
 ]
 
 
+_EN_SORTED = None
+
+
 def _tr(html: str) -> str:
     if cfg_mod.load().get("app.language", "zh") != "en":
         return html
-    for zh, en in sorted(EN_MAP, key=lambda p: len(p[0]), reverse=True):
+    global _EN_SORTED
+    if _EN_SORTED is None:
+        _EN_SORTED = sorted(EN_MAP, key=lambda p: len(p[0]), reverse=True)
+    for zh, en in _EN_SORTED:
         html = html.replace(zh, en)
     return html
 
@@ -1778,7 +1784,7 @@ _syncCiteBtn();
 async function copyDigest(btn) {
   let text = RAWMD;
   if (document.body.classList.contains('nocite'))
-    text = text.replace(/【[^】\n]{1,80}】/g, '');
+    text = text.replace(/【[^】]{1,80}】/g, '');
   let ok = false;
   try { await navigator.clipboard.writeText(text); ok = true; }
   catch(e) {
@@ -2163,13 +2169,23 @@ def vault_file():
 
 # --- Settings -----------------------------------------------------------------
 
+_KEY_CACHE: dict = {}
+
+
 def _key_status(name: str) -> bool:
+    """security 子进程较贵：结果缓存 60 秒，保存密钥时失效。"""
+    import time
+    hit = _KEY_CACHE.get(name)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
     try:
         r = subprocess.run(["security", "find-generic-password", "-s",
                             f"ytrec-{name}"], capture_output=True)
-        return r.returncode == 0
+        ok = r.returncode == 0
     except OSError:
-        return False  # non-macOS (tests)
+        ok = False  # non-macOS (tests)
+    _KEY_CACHE[name] = (time.time(), ok)
+    return ok
 
 
 @app.route('/api', methods=['GET', 'POST'])
@@ -2234,6 +2250,7 @@ def api_page():
                 if val:
                     subprocess.run(['security', 'delete-generic-password', '-s', 'ytrec-' + prov], capture_output=True)
                     r = subprocess.run(['security', 'add-generic-password', '-s', 'ytrec-' + prov, '-a', 'ytrec', '-w', val], capture_output=True, text=True)
+                    _KEY_CACHE.pop(prov, None)
                     msg += ('<span class=ok>' + prov + ' key 已存入钥匙串</span> ' if r.returncode == 0 else '<span class=bad>' + prov + ' 保存失败</span> ')
     dsel = lambda v, cur: 'selected' if v == cur else ''
     def _mopts(prov, fallback):

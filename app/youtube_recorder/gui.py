@@ -2178,10 +2178,28 @@ def report_view(video_id: str):
     answer = request.args.get("_answer", "")
     ans_html = ""
     if answer:
-        ans_html = (f"<div class=card><h3>💬 AI 回答</h3>"
-                    f"<div class=md style='max-width:100%'>"
-                    f"<pre style='white-space:pre-wrap'>{escape(answer)}</pre>"
-                    f"</div></div>")
+        try:
+            import markdown as _md
+            _ans_body = _md.markdown(answer, extensions=["tables", "fenced_code",
+                                                         "sane_lists", "nl2br"])
+        except ImportError:
+            _ans_body = ("<pre style='white-space:pre-wrap'>"
+                         + escape(answer) + "</pre>")
+        import json as _jj
+        ans_html = (
+            "<div class=card><div style='display:flex;align-items:center;gap:10px'>"
+            "<h3 style='margin:0'>💬 AI 回答</h3>"
+            "<button id=anscopy style='font-size:12px;padding:2px 10px'"
+            " onclick='copyAns(this)'>⧉ 复制</button></div>"
+            "<div class=md style='max-width:100%'>" + _ans_body + "</div></div>"
+            "<script>const ANS_RAW = " + _jj.dumps(answer) + ";"
+            "async function copyAns(b){let ok=false;"
+            "try{await navigator.clipboard.writeText(ANS_RAW);ok=true;}"
+            "catch(e){const t=document.createElement('textarea');t.value=ANS_RAW;"
+            "document.body.appendChild(t);t.select();"
+            "try{ok=document.execCommand('copy');}catch(e2){}t.remove();}"
+            "b.textContent=ok?'\u2713 \u5df2\u590d\u5236':'\u590d\u5236\u5931\u8d25';"
+            "setTimeout(()=>{b.textContent='\u29c9 \u590d\u5236';},2500);}</script>")
     vid_e = escape(video_id)
     body = (f"""<div class=card style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <a class=dim href='/reports'>← 返回列表</a>

@@ -42,7 +42,15 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
        --shadow:0 1px 2px rgba(15,15,15,.04),0 3px 9px rgba(15,15,15,.03);
        --acctext:#ffffff}
  *{box-sizing:border-box}
- body{background:var(--bg);color:var(--fg);font:14.5px/1.65 -apple-system,"PingFang SC",sans-serif;margin:0}
+ body{background:var(--bg);color:var(--fg);font:14.5px/1.65 -apple-system,"PingFang SC",sans-serif;margin:0;
+   -webkit-user-select:none;user-select:none;cursor:default}
+ /* 原生窗口默认禁选文本，这里把正文/卡片内容显式设为可选中可复制，
+    交互控件（导航/按钮/标签页）保持不可选。 */
+ .md,.card,p,li,td,th,pre,blockquote,h1,h2,h3,h4,h5,code,
+ .md *,.cite,textarea,input{
+   -webkit-user-select:text;user-select:text;cursor:auto}
+ nav,.tabs,button,select,label,.tagchip,.grpbar{
+   -webkit-user-select:none;user-select:none}
  ::selection{background:var(--accsel)}
  nav{display:flex;gap:4px;padding:10px 22px;background:var(--navbg);
      backdrop-filter:blur(12px);position:sticky;top:0;z-index:9;

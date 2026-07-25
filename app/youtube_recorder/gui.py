@@ -131,6 +131,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
    color:var(--dim);cursor:pointer;transition:all .12s}
  .tagchip:hover{border-color:var(--acc);color:var(--acc)}
  .tagchip.on{background:var(--acc);color:var(--acctext);border-color:var(--acc)}
+ .tagchip.arm{background:#e5484d;color:#fff;border-color:#e5484d}
  .grpbar{position:sticky;top:52px;z-index:8}
  .busy{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99;
    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
@@ -667,6 +668,10 @@ EN_MAP = [
     ('独立', 'keep separate'),
     ('移除孤儿标签（仅 1 篇文章用到）', 'Remove orphan tags (used by only 1 article)'),
     ('，移除 ${d.orphans_removed} 个孤儿标签', ', removed ${d.orphans_removed} orphan tags'),
+    ('标签（点一次选中、再点一次删除）：', 'Tags (click once to select, again to delete):'),
+    ('（再点删除）', ' (click again to delete)'),
+    ('删除中…', 'Deleting…'),
+    ('阅读 · YouTube Recorder', 'Read · YouTube Recorder'),
 ]
 
 
@@ -2237,6 +2242,26 @@ def report_view(video_id: str):
     except ValueError:
         abort(403)
     html = _md_to_html(p.read_text(encoding="utf-8"), video_id)
+    # 文章标签（原始 article.json，供阅读页两击删除）
+    import json as _tj
+    from .paths import work_dir as _wd
+    _atags = []
+    try:
+        _aj = _wd(video_id) / "article.json"
+        if _aj.exists():
+            _atags = [t for t in _tj.loads(_aj.read_text(encoding="utf-8")).get("tags", [])
+                      if isinstance(t, str) and t.strip()]
+    except Exception:
+        _atags = []
+    tags_html = ""
+    if _atags:
+        chips = "".join(
+            '<span class="tagchip tgedit" data-tag="' + escape(t) + '">'
+            + escape(t) + '</span>' for t in _atags)
+        tags_html = (
+            '<div class=card style="padding:10px 14px"><span class=dim '
+            'style="margin-right:8px">标签（点一次选中、再点一次删除）：</span>'
+            '<span id=tagedit>' + chips + '</span></div>')
     answer = request.args.get("_answer", "")
     ans_html = ""
     if answer:
@@ -2272,6 +2297,7 @@ def report_view(video_id: str):
 <input type=hidden name=_csrf value={CSRF}>
 <button>♻ AI 重新总结</button></form>
 <span id=imghint class=dim></span></div>
+{tags_html}
 {ans_html}
 <div class=card><form method=post action="/reports/{vid_e}/ask"
  style="display:flex;gap:8px" onsubmit="this.querySelector('button').textContent='思考中…'">
@@ -2308,8 +2334,82 @@ function updateHint() {{
 }}
 wireImgs();
 window.addEventListener('load', () => setTimeout(updateHint, 2500));
+(function() {{
+  const box = document.getElementById('tagedit');
+  if (!box) return;
+  box.addEventListener('click', async (e) => {{
+    const chip = e.target.closest('.tgedit');
+    if (!chip) return;
+    if (!chip.classList.contains('arm')) {{
+      box.querySelectorAll('.tgedit.arm').forEach(c => {{
+        c.classList.remove('arm'); c.textContent = c.dataset.tag;
+      }});
+      chip.classList.add('arm');
+      chip.textContent = '✕ ' + chip.dataset.tag + '（再点删除）';
+      return;
+    }}
+    const tag = chip.dataset.tag;
+    chip.textContent = '删除中…';
+    try {{
+      const r = await fetch('/reports/{vid_e}/tag-remove', {{method:'POST',
+        headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+        body:'_csrf={CSRF}&tag=' + encodeURIComponent(tag)}});
+      const d = await r.json();
+      if (d.ok) chip.remove();
+      else {{ chip.classList.remove('arm'); chip.textContent = tag; }}
+    }} catch (err) {{ chip.classList.remove('arm'); chip.textContent = tag; }}
+  }});
+}})();
 </script>""")
     return page("阅读", "reports", body)
+
+
+@app.post("/reports/<video_id>/tag-remove")
+def report_tag_remove(video_id: str):
+    check_csrf()
+    tag = (request.form.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "empty tag"}, 400
+    from .paths import work_dir
+    import json as _j
+    aj = work_dir(video_id) / "article.json"
+    if not aj.exists():
+        return {"ok": False, "error": "no article"}, 404
+    try:
+        art = _j.loads(aj.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ok": False, "error": "bad article json"}, 500
+    tags = [t for t in (art.get("tags") or []) if t != tag]
+    if len(tags) == len(art.get("tags") or []):
+        return {"ok": True, "removed": 0, "tags": tags}  # 幂等：本就没有
+    art["tags"] = tags
+    tmp = aj.with_suffix(".json.tmp")
+    tmp.write_text(_j.dumps(art, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(aj)
+    # 同步更新 Obsidian 笔记 frontmatter 的 tags 行（保持一致）
+    try:
+        con = _con()
+        row = con.execute(
+            "SELECT note_path FROM writes WHERE video_id=? AND note_kind='wiki' "
+            "ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
+        con.close()
+        if row:
+            from . import vault as _vault
+            np = Path(row["note_path"])
+            root = _vault_root()
+            if root and np.exists():
+                np.resolve().relative_to(root.resolve())
+                import re as _re
+                txt = np.read_text(encoding="utf-8")
+                new_line = "tags: " + _vault._yaml_list(tags)
+                txt2 = _re.sub(r"(?m)^tags: .*$", new_line, txt, count=1)
+                if txt2 != txt:
+                    ntmp = np.with_suffix(".md.tmp")
+                    ntmp.write_text(txt2, encoding="utf-8")
+                    ntmp.replace(np)
+    except Exception:
+        pass  # 笔记同步失败不影响 article.json 主结果
+    return {"ok": True, "removed": 1, "tags": tags}
 
 
 @app.route("/reports/<video_id>/ask", methods=["POST"])

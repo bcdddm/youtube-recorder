@@ -221,3 +221,43 @@ def test_orphan_tag_counts_and_hidden_filter():
     all_tags = {t for r in data for t in (r.get("tags") or [])}
     assert "AI" in all_tags and "稀有A" not in all_tags and "稀有B" not in all_tags
     gui._tagmap_path().unlink(missing_ok=True)
+
+
+def test_report_tag_remove():
+    import json
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+    import youtube_recorder.config as cfg_mod
+    import os
+    root = os.path.join(os.environ["YTREC_HOME"], "vault2")
+    os.makedirs(root, exist_ok=True)
+    note = os.path.join(root, "n.md")
+    open(note, "w", encoding="utf-8").write(
+        '---\ntype: video\ntags: ["投资", "美股", "英伟达"]\n---\n\n# t\n\n正文\n')
+    c = cfg_mod.load(); c.data["vault"]["root"] = root; cfg_mod.save(c)
+    con = gui._con()
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) VALUES('UCtr','','t',1,?)", (dbm.now(),))
+    dbm.upsert_discovered(con, "trvid", "UCtr", "v", "2026-07-20T00:00:00Z")
+    con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES('trvid','wiki',?,'h',?)", (note, dbm.now()))
+    con.commit(); con.close()
+    wd = work_dir("trvid"); wd.mkdir(parents=True, exist_ok=True)
+    (wd / "article.json").write_text(json.dumps(
+        {"tags": ["投资", "美股", "英伟达"]}, ensure_ascii=False))
+    cli = gui.app.test_client()
+    # reading page shows editable chips
+    html = cli.get("/reports/trvid").get_data(as_text=True)
+    assert "tgedit" in html and "英伟达" in html
+    # delete one tag
+    r = cli.post("/reports/trvid/tag-remove", data={"_csrf": gui.CSRF, "tag": "美股"})
+    d = r.get_json()
+    assert d["ok"] and d["removed"] == 1 and "美股" not in d["tags"]
+    # article.json updated
+    saved = json.loads((wd / "article.json").read_text())
+    assert saved["tags"] == ["投资", "英伟达"]
+    # note frontmatter updated
+    nt = open(note, encoding="utf-8").read()
+    assert '"美股"' not in nt and '"投资"' in nt and '"英伟达"' in nt
+    # idempotent
+    r2 = cli.post("/reports/trvid/tag-remove", data={"_csrf": gui.CSRF, "tag": "美股"})
+    assert r2.get_json()["removed"] == 0

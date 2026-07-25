@@ -21,7 +21,30 @@ from . import config as cfg_mod
 from . import db as dbm
 from . import state as st
 
-CSRF = secrets.token_hex(16)
+def _load_or_make_csrf() -> str:
+    """持久化 CSRF 令牌：跨进程重启保持不变，避免 App 更新/重启后
+    webview 里已打开的旧页面提交表单时令牌失配（403 Forbidden）。"""
+    try:
+        from .paths import APP_SUPPORT
+        f = APP_SUPPORT / ".csrf"
+        if f.exists():
+            tok = f.read_text(encoding="utf-8").strip()
+            if len(tok) >= 16:
+                return tok
+        tok = secrets.token_hex(16)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(tok, encoding="utf-8")
+        try:
+            import os as _os
+            _os.chmod(f, 0o600)
+        except OSError:
+            pass
+        return tok
+    except Exception:
+        return secrets.token_hex(16)  # 退化：仍可用，只是重启后失效
+
+
+CSRF = _load_or_make_csrf()
 app = Flask(__name__)
 
 BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -727,7 +750,20 @@ def page(title: str, page_id: str, body: str):
 
 def check_csrf():
     if request.form.get("_csrf") != CSRF:
-        abort(403)
+        # 友好恢复：多为旧页面令牌过期，跳回来源页拿新令牌，而非裸 403
+        from flask import make_response
+        back = request.referrer or "/reports"
+        html = ("<!doctype html><meta charset=utf-8>"
+                "<body style='font:15px -apple-system,sans-serif;padding:40px'>"
+                "<p>页面已过期，正在刷新… / Session expired, reloading…</p>"
+                "<script>location.replace(" + _json_dumps(back) + ")</script>"
+                "</body>")
+        abort(make_response(html, 403))
+
+
+def _json_dumps(s):
+    import json as _j
+    return _j.dumps(s)
 
 
 def _con():

@@ -673,6 +673,7 @@ EN_MAP = [
     ('删除中…', 'Deleting…'),
     ('阅读 · YouTube Recorder', 'Read · YouTube Recorder'),
     ('涉及标签', 'Tags covered'),
+    ('（点一次选中、再点一次从当天全部相关文章删除）', ' (click once to select, again to remove from all related articles that day)'),
 ]
 
 
@@ -1914,12 +1915,15 @@ def reports_digest():
     tag_html = ""
     if tag_counts:
         chips = "".join(
-            '<span class=tagchip>' + str(escape(t))
+            '<span class="tagchip tgedit" data-tag="' + str(escape(t)) + '"'
+            + ' data-n="' + str(n) + '">' + str(escape(t))
             + (' <span class=dim>×' + str(n) + '</span>' if n > 1 else '')
             + '</span>'
             for t, n in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0])))
-        tag_html = ('<div class=md style="margin-top:16px"><h2>涉及标签</h2>'
-                    '<div style="line-height:2.2">' + chips + '</div></div>')
+        tag_html = ('<div class=md style="margin-top:16px"><h2>涉及标签'
+                    '<span class=dim style="font-size:13px;font-weight:400">'
+                    '（点一次选中、再点一次从当天全部相关文章删除）</span></h2>'
+                    '<div id=digesttags style="line-height:2.2">' + chips + '</div></div>')
     body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
             f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
             f' · 共 {len(items)} 篇</span>{cache_note}{regen}'
@@ -1927,8 +1931,37 @@ def reports_digest():
             f'{tag_html}'
             f'<div class=md style="margin-top:18px"><h2>引用来源</h2>'
             f'<ol>{refs}</ol></div></div>'
+            + _digest_tag_js(date, grp)
             + _DIGEST_TOOLS_JS.replace("__RAWMD__", _j.dumps(md)))
     return page("日报", "reports", body)
+
+
+def _digest_tag_js(date: str, grp: str) -> str:
+    import json as _j
+    return ("<script>(function(){"
+            "var box=document.getElementById('digesttags');"
+            "if(!box)return;"
+            "var DATE=" + _j.dumps(date) + ",GRP=" + _j.dumps(grp) + ";"
+            "function disarm(){box.querySelectorAll('.tgedit.arm').forEach(function(c){"
+            "c.classList.remove('arm');c.innerHTML=c.dataset.html;});}"
+            "box.querySelectorAll('.tgedit').forEach(function(c){c.dataset.html=c.innerHTML;});"
+            "document.addEventListener('click',function(e){"
+            "if(!e.target.closest('#digesttags .tgedit'))disarm();});"
+            "box.addEventListener('click',function(e){"
+            "var chip=e.target.closest('.tgedit');if(!chip)return;"
+            "if(!chip.classList.contains('arm')){disarm();chip.classList.add('arm');"
+            "var n=chip.dataset.n>1?('（'+chip.dataset.n+'篇）'):'';"
+            "chip.textContent='\u2715 '+chip.dataset.tag+n+'（再点删除）';return;}"
+            "var tag=chip.dataset.tag;chip.textContent='\u5220\u9664\u4e2d\u2026';"
+            "fetch('/reports/digest/tag-remove',{method:'POST',"
+            "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+            "body:'_csrf=" + CSRF + "&date='+encodeURIComponent(DATE)"
+            "+'&grp='+encodeURIComponent(GRP)+'&tag='+encodeURIComponent(tag)})"
+            ".then(function(r){return r.json();}).then(function(d){"
+            "if(d.ok)chip.remove();else{chip.classList.remove('arm');"
+            "chip.innerHTML=chip.dataset.html;}})"
+            ".catch(function(){chip.classList.remove('arm');chip.innerHTML=chip.dataset.html;});"
+            "});})();</script>")
 
 
 _DIGEST_TOOLS_JS = """
@@ -2358,13 +2391,19 @@ window.addEventListener('load', () => setTimeout(updateHint, 2500));
 (function() {{
   const box = document.getElementById('tagedit');
   if (!box) return;
+  function disarmAll() {{
+    box.querySelectorAll('.tgedit.arm').forEach(c => {{
+      c.classList.remove('arm'); c.textContent = c.dataset.tag;
+    }});
+  }}
+  document.addEventListener('click', (e) => {{
+    if (!e.target.closest('#tagedit .tgedit')) disarmAll();
+  }});
   box.addEventListener('click', async (e) => {{
     const chip = e.target.closest('.tgedit');
     if (!chip) return;
     if (!chip.classList.contains('arm')) {{
-      box.querySelectorAll('.tgedit.arm').forEach(c => {{
-        c.classList.remove('arm'); c.textContent = c.dataset.tag;
-      }});
+      disarmAll();
       chip.classList.add('arm');
       chip.textContent = '✕ ' + chip.dataset.tag + '（再点删除）';
       return;
@@ -2386,28 +2425,26 @@ window.addEventListener('load', () => setTimeout(updateHint, 2500));
 
 
 @app.post("/reports/<video_id>/tag-remove")
-def report_tag_remove(video_id: str):
-    check_csrf()
-    tag = (request.form.get("tag") or "").strip()
-    if not tag:
-        return {"ok": False, "error": "empty tag"}, 400
+def _remove_article_tag(video_id: str, tag: str) -> bool:
+    """从某篇文章的 article.json 移除标签，并同步 Obsidian 笔记 frontmatter。
+    返回是否实际删除（幂等：本就没有则 False）。"""
     from .paths import work_dir
     import json as _j
     aj = work_dir(video_id) / "article.json"
     if not aj.exists():
-        return {"ok": False, "error": "no article"}, 404
+        return False
     try:
         art = _j.loads(aj.read_text(encoding="utf-8"))
     except Exception:
-        return {"ok": False, "error": "bad article json"}, 500
-    tags = [t for t in (art.get("tags") or []) if t != tag]
-    if len(tags) == len(art.get("tags") or []):
-        return {"ok": True, "removed": 0, "tags": tags}  # 幂等：本就没有
+        return False
+    orig = art.get("tags") or []
+    tags = [t for t in orig if t != tag]
+    if len(tags) == len(orig):
+        return False
     art["tags"] = tags
     tmp = aj.with_suffix(".json.tmp")
     tmp.write_text(_j.dumps(art, ensure_ascii=False), encoding="utf-8")
     tmp.replace(aj)
-    # 同步更新 Obsidian 笔记 frontmatter 的 tags 行（保持一致）
     try:
         con = _con()
         row = con.execute(
@@ -2429,8 +2466,58 @@ def report_tag_remove(video_id: str):
                     ntmp.write_text(txt2, encoding="utf-8")
                     ntmp.replace(np)
     except Exception:
-        pass  # 笔记同步失败不影响 article.json 主结果
-    return {"ok": True, "removed": 1, "tags": tags}
+        pass
+    return True
+
+
+def report_tag_remove(video_id: str):
+    check_csrf()
+    tag = (request.form.get("tag") or "").strip()
+    if not tag:
+        return {"ok": False, "error": "empty tag"}, 400
+    from .paths import work_dir
+    if not (work_dir(video_id) / "article.json").exists():
+        return {"ok": False, "error": "no article"}, 404
+    removed = _remove_article_tag(video_id, tag)
+    import json as _j
+    art = _j.loads((work_dir(video_id) / "article.json").read_text(encoding="utf-8"))
+    return {"ok": True, "removed": 1 if removed else 0, "tags": art.get("tags", [])}
+
+
+@app.post("/reports/digest/tag-remove")
+def digest_tag_remove():
+    """从当天该范围内所有含此标签的文章移除标签（日报「涉及标签」两击删除）。"""
+    check_csrf()
+    tag = (request.form.get("tag") or "").strip()
+    date = (request.form.get("date") or "")[:10]
+    grp = (request.form.get("grp") or "").strip()
+    if not tag or not date:
+        return {"ok": False, "error": "missing tag/date"}, 400
+    con = _con()
+    rows = con.execute(
+        "SELECT w.video_id, c.grp cgrp FROM writes w "
+        "JOIN videos v USING(video_id) "
+        "LEFT JOIN channels c USING(channel_id) "
+        "WHERE w.note_kind='wiki'").fetchall()
+    con2 = _con()
+    targets = []
+    for r in rows:
+        v = con2.execute("SELECT published_at FROM videos WHERE video_id=?",
+                        (r["video_id"],)).fetchone()
+        if not v or dbm.local_date(v["published_at"]) != date:
+            continue
+        if grp:
+            raw_sel = [g.strip() for g in grp.split(",")]
+            allowed = {g for g in raw_sel if g}
+            vg = set(_grps_of(r["cgrp"]))
+            if not ((vg & allowed) or ("" in raw_sel and not vg)):
+                continue
+        targets.append(r["video_id"])
+    con2.close()
+    con.close()
+    removed = sum(1 for vid in targets if _remove_article_tag(vid, tag))
+    # 让缓存日报重算涉及标签（下次打开即最新）
+    return {"ok": True, "removed": removed, "articles": len(targets)}
 
 
 @app.route("/reports/<video_id>/ask", methods=["POST"])

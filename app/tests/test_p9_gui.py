@@ -261,3 +261,37 @@ def test_report_tag_remove():
     # idempotent
     r2 = cli.post("/reports/trvid/tag-remove", data={"_csrf": gui.CSRF, "tag": "美股"})
     assert r2.get_json()["removed"] == 0
+
+
+def test_digest_bulk_tag_remove():
+    import json, os
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+    import youtube_recorder.config as cfg_mod
+    root = os.path.join(os.environ["YTREC_HOME"], "vaultd")
+    os.makedirs(root, exist_ok=True)
+    c = cfg_mod.load(); c.data["vault"]["root"] = root; cfg_mod.save(c)
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) VALUES('UCbd','','b',1,?)", (dbm.now(),))
+    for vid, tags in {"bd1": ["AI", "美股"], "bd2": ["AI", "财报"]}.items():
+        dbm.upsert_discovered(con, vid, "UCbd", vid, "2026-07-20T08:00:00Z")
+        con.execute("UPDATE videos SET published_at='2026-07-20T08:00:00Z' WHERE video_id=?", (vid,))
+        note = os.path.join(root, vid + ".md")
+        open(note, "w", encoding="utf-8").write('---\ntags: ["AI"]\n---\n# t\n')
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+    con.commit(); con.close()
+    cli = gui.app.test_client()
+    r = cli.post("/reports/digest/tag-remove", data={
+        "_csrf": gui.CSRF, "date": "2026-07-20", "grp": "", "tag": "AI"})
+    d = r.get_json()
+    assert d["ok"] and d["removed"] == 2 and d["articles"] == 2
+    assert json.loads((work_dir("bd1") / "article.json").read_text())["tags"] == ["美股"]
+    assert json.loads((work_dir("bd2") / "article.json").read_text())["tags"] == ["财报"]
+    # idempotent second call
+    d2 = cli.post("/reports/digest/tag-remove", data={
+        "_csrf": gui.CSRF, "date": "2026-07-20", "grp": "", "tag": "AI"}).get_json()
+    assert d2["removed"] == 0

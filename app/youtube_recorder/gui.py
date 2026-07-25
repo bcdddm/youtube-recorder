@@ -2256,8 +2256,8 @@ def report_view(video_id: str):
     tags_html = ""
     if _atags:
         chips = "".join(
-            '<span class="tagchip tgedit" data-tag="' + escape(t) + '">'
-            + escape(t) + '</span>' for t in _atags)
+            '<span class="tagchip tgedit" data-tag="' + str(escape(t)) + '">'
+            + str(escape(t)) + '</span>' for t in _atags)
         tags_html = (
             '<div class=card style="padding:10px 14px"><span class=dim '
             'style="margin-right:8px">标签（点一次选中、再点一次删除）：</span>'

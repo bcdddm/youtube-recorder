@@ -21,8 +21,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleName</key><string>YouTube Recorder</string>
     <key>CFBundleDisplayName</key><string>YouTube Recorder</string>
     <key>CFBundleIdentifier</key><string>com.leoluchino.youtube-recorder.app</string>
-    <key>CFBundleVersion</key><string>0.4.11</string>
-    <key>CFBundleShortVersionString</key><string>0.4.11</string>
+    <key>CFBundleVersion</key><string>0.4.12</string>
+    <key>CFBundleShortVersionString</key><string>0.4.12</string>
     <key>CFBundleExecutable</key><string>launcher</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>

@@ -672,6 +672,7 @@ EN_MAP = [
     ('（再点删除）', ' (click again to delete)'),
     ('删除中…', 'Deleting…'),
     ('阅读 · YouTube Recorder', 'Read · YouTube Recorder'),
+    ('涉及标签', 'Tags covered'),
 ]
 
 
@@ -1807,6 +1808,8 @@ def reports_digest():
         "WHERE w.note_kind='wiki' GROUP BY w.video_id").fetchall()
     import json as _json
     from .paths import work_dir
+    _digest_tmap = _load_tagmap()
+    _digest_hidden = _load_hidden()
     items = []
     item_grps = set()
     for r in rows:
@@ -1835,6 +1838,10 @@ def reports_digest():
             "takeaways": meta.get("takeaways", []),
             "sections": [sec.get("heading", "")
                          for sec in meta.get("sections", [])][:12],
+            "tags": [t for t in _merge_tags(
+                [x for x in meta.get("tags", [])[:6]
+                 if isinstance(x, str) and x.strip()], _digest_tmap)
+                if t not in _digest_hidden],
         })
     con.close()
     if not items:
@@ -1900,10 +1907,24 @@ def reports_digest():
              f' onclick="toggleCites()">显示引用：开</button>'
              f'<button style="font-size:12px;padding:2px 10px;margin-left:8px"'
              f' onclick="copyDigest(this)">⧉ 复制</button>')
+    tag_counts = {}
+    for it in items:
+        for t in it.get("tags", []):
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    tag_html = ""
+    if tag_counts:
+        chips = "".join(
+            '<span class=tagchip>' + str(escape(t))
+            + (' <span class=dim>×' + str(n) + '</span>' if n > 1 else '')
+            + '</span>'
+            for t, n in sorted(tag_counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        tag_html = ('<div class=md style="margin-top:16px"><h2>涉及标签</h2>'
+                    '<div style="line-height:2.2">' + chips + '</div></div>')
     body = (f'<div class=card><a class=dim href="/reports">← 返回时间轴</a>'
             f'<span class=dim style="margin-left:10px">{scope}{escape(date)}'
             f' · 共 {len(items)} 篇</span>{cache_note}{regen}'
             f'<div class=md>{html}</div>'
+            f'{tag_html}'
             f'<div class=md style="margin-top:18px"><h2>引用来源</h2>'
             f'<ol>{refs}</ol></div></div>'
             + _DIGEST_TOOLS_JS.replace("__RAWMD__", _j.dumps(md)))

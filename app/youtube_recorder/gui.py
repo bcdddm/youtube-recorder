@@ -1877,9 +1877,10 @@ def reports_digest():
             if gp_text:
                 _dsys += ("\n\n各组的个性化要求（只作用于对应组的文章；"
                           "不得虚构，不得因此遗漏要点）：\n" + gp_text)
-            md = providers.complete(cfg_mod.load(), None, f"digest-{date}",
-                                    _dsys, user,
-                                    max_tokens=5000, purpose="report_qa")
+            md = providers.complete_long(cfg_mod.load(), None, f"digest-{date}",
+                                         _dsys, user,
+                                         max_tokens=8000, purpose="report_qa",
+                                         max_rounds=3)
             cache.write_text(md, encoding="utf-8")
             import json as _jt
             _digest_timing_path().write_text(_jt.dumps({"last_sec": int(_time.time() - _t0)}), encoding="utf-8")

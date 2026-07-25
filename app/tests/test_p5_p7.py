@@ -166,3 +166,25 @@ def test_local_provider_backends():
         pass
     # free providers never bill
     assert pv.FREE_PROVIDERS == {"claude_cli", "ollama"}
+
+
+def test_complete_long_continuation():
+    from youtube_recorder import providers as pv
+    assert pv._looks_truncated("市场会首先") is True
+    assert pv._looks_truncated("收尾。") is False
+    assert pv._looks_truncated("done.") is False
+    orig = pv.complete
+    seq = ["前半被截断", "，后半补齐完成。", "。"]
+    n = {"i": 0}
+    def fake(cfg, con, vid, system, user, max_tokens=8000, purpose="article"):
+        i = n["i"]; n["i"] += 1
+        return seq[i] if i < len(seq) else "。"
+    pv.complete = fake
+    try:
+        out = pv.complete_long(None, None, "v", "s", "u", max_rounds=3)
+        assert out == "前半被截断，后半补齐完成。" and n["i"] == 2
+        # non-truncated first shot → single round
+        n["i"] = 0; seq[0] = "一次写完。"
+        assert pv.complete_long(None, None, "v", "s", "u") == "一次写完。" and n["i"] == 1
+    finally:
+        pv.complete = orig

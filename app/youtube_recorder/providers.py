@@ -276,6 +276,38 @@ def complete(cfg, con, video_id: str, system: str, user: str,
     raise last or ProviderError("no provider available", transient=False)
 
 
+_TERMINAL_CHARS = "。！？…”』」）)】.!?~～"
+
+
+def _looks_truncated(text: str) -> bool:
+    """结尾不是句末标点则视为被截断（用于日报等长文本的续写判断）。"""
+    t = (text or "").rstrip().rstrip("*_ \t\r\n>-")
+    if not t:
+        return False
+    return t[-1] not in _TERMINAL_CHARS
+
+
+def complete_long(cfg, con, video_id: str, system: str, user: str,
+                  max_tokens: int = 8000, purpose: str = "article",
+                  max_rounds: int = 3) -> str:
+    """长文本生成：若模型因长度截断（结尾无句末标点），自动从截断处续写，
+    最多 max_rounds 轮，拼成完整结果。任一轮 provider 报错则抛出。"""
+    full = ""
+    cur_user = user
+    for _ in range(max_rounds + 1):
+        part = complete(cfg, con, video_id, system, cur_user,
+                        max_tokens=max_tokens, purpose=purpose)
+        if not part:
+            break
+        full = (full + part) if not full else (full.rstrip() + part)
+        if not _looks_truncated(full):
+            break
+        cur_user = (user + "\n\n（以下是你已经写好的部分，但被长度限制截断了。"
+                    "请从截断处继续写完，不要重复已有内容、不要重复任何标题，"
+                    "直接输出后续 Markdown：\n\n" + full[-1500:])
+    return full
+
+
 def extract_json(text: str) -> dict:
     """Parse a JSON object out of an LLM reply (handles ```json fences)."""
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)

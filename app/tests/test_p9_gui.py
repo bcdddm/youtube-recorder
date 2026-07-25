@@ -191,3 +191,33 @@ def test_tag_merge_interactive():
     saved = json.loads(gui._tagmap_path().read_text())
     assert saved["decisions"]["AI 芯片"] == "芯片"
     assert saved["map"]["AI 芯片"] == "芯片"
+
+
+def test_orphan_tag_counts_and_hidden_filter():
+    import json
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) VALUES('UCorph','','o',1,?)", (dbm.now(),))
+    # 3 篇文章：AI 出现 3 次；孤儿标签「稀有A/稀有B」各只 1 篇
+    specs = {"o1": ["AI", "稀有A"], "o2": ["AI", "稀有B"], "o3": ["AI"]}
+    for vid, tags in specs.items():
+        dbm.upsert_discovered(con, vid, "UCorph", vid, "2026-07-20T00:00:00Z")
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES(?,'wiki',?,'h',?)",
+                    (vid, f"/tmp/{vid}.md", dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+    con.commit()
+    counts = gui._canon_article_counts(con, {})
+    assert counts["AI"] == 3 and counts["稀有A"] == 1 and counts["稀有B"] == 1
+    con.close()
+    # hidden filter hides orphans from reports.json
+    gui._tagmap_path().write_text(json.dumps(
+        {"map": {}, "decisions": {}, "hidden": ["稀有A", "稀有B"]}, ensure_ascii=False))
+    cli = gui.app.test_client()
+    data = cli.get("/reports.json").get_json()
+    all_tags = {t for r in data for t in (r.get("tags") or [])}
+    assert "AI" in all_tags and "稀有A" not in all_tags and "稀有B" not in all_tags
+    gui._tagmap_path().unlink(missing_ok=True)

@@ -586,7 +586,8 @@ EN_MAP = [
     ('成品原子写入下方位置并读回校验；之后在 Reports 页阅读、按时间轴浏览、按标签筛选，', 'Output is written atomically to the location below and verified by read-back; then read it in Reports — timeline view, tag filters, '),
     ('🏷 AI 归并同义标签', '🏷 AI-merge similar tags'),
     ('归并中…（AI 分析全部标签）', 'Merging… (AI analyzing all tags)'),
-    ('已合并 ${d.merged} 个同义标签（共 ${d.total} 个）', 'Merged ${d.merged} similar tags (of ${d.total})'),
+    ('已合并 ${d.merged} 个同义标签', 'Merged ${d.merged} similar tags'),
+    ('（共 ${d.total} 个）', ' (of ${d.total})'),
     ('归并失败', 'Merge failed'),
     ('⬇ 导出订阅', '⬇ Export subscriptions'),
     ('⬆ 导入订阅', '⬆ Import subscriptions'),
@@ -664,6 +665,8 @@ EN_MAP = [
     ('已应用 ', 'Applied '),
     (' 条人工决定', ' manual decision(s)'),
     ('独立', 'keep separate'),
+    ('移除孤儿标签（仅 1 篇文章用到）', 'Remove orphan tags (used by only 1 article)'),
+    ('，移除 ${d.orphans_removed} 个孤儿标签', ', removed ${d.orphans_removed} orphan tags'),
 ]
 
 
@@ -1484,14 +1487,16 @@ def reports_json():
     import json as _json
     from .paths import work_dir
     tmap = _load_tagmap()
+    hidden = _load_hidden()
     out = []
     for r in rows:
         tags = []
         try:
             aj = work_dir(r["video_id"]) / "article.json"
             if aj.exists():
-                tags = _merge_tags(
+                tags = [t for t in _merge_tags(
                     _json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6], tmap)
+                    if t not in hidden]
         except Exception:
             pass
         out.append({
@@ -1560,20 +1565,43 @@ def _merge_tags(tags, tmap):
     return out
 
 
-def _all_article_tags(con) -> list:
+def _article_tag_lists(con) -> list:
+    """每篇文章的原始标签列表（去重后 [:6]），用于计数孤儿标签。"""
     import json as _json
     from .paths import work_dir
     rows = con.execute(
         "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
-    tags = set()
+    out = []
     for r in rows:
         try:
             aj = work_dir(r["video_id"]) / "article.json"
             if aj.exists():
-                tags.update(_json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6])
+                ts = _json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6]
+                out.append([t for t in ts if isinstance(t, str) and t.strip()])
         except Exception:
             pass
+    return out
+
+
+def _all_article_tags(con) -> list:
+    tags = set()
+    for lst in _article_tag_lists(con):
+        tags.update(lst)
     return sorted(tags)
+
+
+def _canon_article_counts(con, tmap: dict) -> dict:
+    """归并后每个规范标签被多少篇文章使用（每篇去重计一次）。"""
+    counts: dict = {}
+    for lst in _article_tag_lists(con):
+        for t in {tmap.get(x, x) for x in lst}:
+            counts[t] = counts.get(t, 0) + 1
+    return counts
+
+
+def _load_hidden() -> set:
+    h = _load_tagfile().get("hidden")
+    return set(h) if isinstance(h, list) else set()
 
 
 @app.post("/tags/merge")
@@ -1629,10 +1657,28 @@ def tags_merge():
                    "options": opts[:6]})
         if len(qs) >= 5:
             break
+    # 孤儿标签清理（可选）：归并后仍只被 <= orphan_min 篇文章使用的标签，从展示层隐藏。
+    hidden = []
+    drop_orphans = request.form.get("drop_orphans") == "1"
+    try:
+        orphan_min = max(1, int(request.form.get("orphan_min", 1)))
+    except (TypeError, ValueError):
+        orphan_min = 1
+    if drop_orphans:
+        con2 = _con()
+        counts = _canon_article_counts(con2, tmap)
+        con2.close()
+        # 不隐藏：用户已人工决定过的标签、以及作为某组规范名的标签
+        canon_names = set(tmap.values())
+        keep = set(decisions.keys()) | canon_names
+        hidden = sorted(t for t, c in counts.items()
+                        if c <= orphan_min and t not in keep)
     _tagmap_path().write_text(_j.dumps(
-        {"map": tmap, "decisions": decisions, "made": dbm.now(), "tags": tags},
+        {"map": tmap, "decisions": decisions, "hidden": hidden,
+         "orphan_min": orphan_min, "made": dbm.now(), "tags": tags},
         ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"ok": True, "merged": len(tmap), "total": len(tags), "questions": qs}
+    return {"ok": True, "merged": len(tmap), "total": len(tags),
+            "orphans_removed": len(hidden), "questions": qs}
 
 
 @app.post("/tags/merge/answers")
@@ -1661,8 +1707,11 @@ def tags_merge_answers():
             decisions[tag] = choice
             applied += 1
     tmap = _apply_tag_decisions(tmap, decisions)
+    # 用户确认的标签不再被当作孤儿隐藏
+    hidden = [h for h in data.get("hidden", []) if h not in decisions]
     _tagmap_path().write_text(_j.dumps(
-        {"map": tmap, "decisions": decisions, "made": dbm.now(),
+        {"map": tmap, "decisions": decisions, "hidden": hidden,
+         "orphan_min": data.get("orphan_min", 1), "made": dbm.now(),
          "tags": data.get("tags", sorted(tagset))},
         ensure_ascii=False, indent=1), encoding="utf-8")
     return {"ok": True, "applied": applied, "merged": len(tmap)}
@@ -1924,7 +1973,10 @@ _REPORTS_TMPL = """
 <div class=tagwrap><div class=taginner>
 <span class=dim style="margin-right:6px">标签：</span><span id=tags></span>
 </div></div>
-<div style="text-align:right;margin-top:2px"><button id=mtbtn
+<div style="text-align:right;margin-top:2px">
+<label class=dim style="font-size:11px;margin-right:10px;user-select:none;cursor:pointer">
+<input type=checkbox id=dropOrphan> 移除孤儿标签（仅 1 篇文章用到）</label>
+<button id=mtbtn
  style="font-size:11px;padding:1px 8px" onclick="mergeTags()">🏷 AI 归并同义标签</button></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
@@ -2078,14 +2130,16 @@ async function reloadData() {
 }
 async function mergeTags() {
   const b = document.getElementById('mtbtn');
+  const drop = document.getElementById('dropOrphan').checked ? '1' : '0';
   b.disabled = true; b.textContent = '归并中…（AI 分析全部标签）';
   try {
     const r = await fetch('/tags/merge', {method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:'_csrf=' + CSRF_T});
+      body:'_csrf=' + CSRF_T + '&drop_orphans=' + drop});
     const d = await r.json();
     if (d.ok) {
-      b.textContent = `已合并 ${d.merged} 个同义标签（共 ${d.total} 个）`;
+      const orph = d.orphans_removed ? `，移除 ${d.orphans_removed} 个孤儿标签` : '';
+      b.textContent = `已合并 ${d.merged} 个同义标签${orph}（共 ${d.total} 个）`;
       await reloadData();
       if (d.questions && d.questions.length) { showTagQuiz(d.questions); return; }
     }

@@ -114,6 +114,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_failed_work_days": 30,
         "keep_original_transcript": "forever",
     },
+    "downloads": {
+        # 独立的"粘贴链接直接下载视频"功能——与转录/整理管线无关
+        "dest_dir": str(Path.home() / "Downloads" / "YouTube Recorder"),
+        "default_quality": "1080p",  # best | 2160p | 1080p | 720p | audio
+    },
     "groups": {
         # 基于组的总结/改写个性化：{组名: prompt}。多篇日报与单篇改写时注入，
         # 并标注来源组；忠实性规则（不编造事实）始终优先。
@@ -222,6 +227,11 @@ def validate(data: dict[str, Any]) -> list[str]:
           isinstance(gp, dict) and all(
               isinstance(k, str) and isinstance(v, str) for k, v in gp.items()),
           "must be a mapping of group name -> prompt text")
+
+    dq = data.get("downloads", {}).get("default_quality", "1080p")
+    check("downloads.default_quality",
+          dq in ("best", "2160p", "1080p", "720p", "480p", "audio"),
+          "must be one of best/2160p/1080p/720p/480p/audio")
 
     root = data.get("vault", {}).get("root", "")
     if root:

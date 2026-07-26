@@ -295,3 +295,52 @@ def test_digest_bulk_tag_remove():
     d2 = cli.post("/reports/digest/tag-remove", data={
         "_csrf": gui.CSRF, "date": "2026-07-20", "grp": "", "tag": "AI"}).get_json()
     assert d2["removed"] == 0
+
+
+def test_quickdl_valid_url_and_job_lifecycle():
+    from youtube_recorder import quickdl
+    assert quickdl.valid_url("https://youtu.be/abc123")
+    assert quickdl.valid_url("http://x.com/v")
+    assert not quickdl.valid_url("not a url")
+    assert not quickdl.valid_url("")
+    assert not quickdl.valid_url("ftp://x.com")
+
+    jid = quickdl._new_job()
+    j = quickdl.get_job(jid)
+    assert j["status"] == "queued" and j["id"] == jid
+    with quickdl._LOCK:
+        quickdl._JOBS[jid]["status"] = "done"
+        quickdl._JOBS[jid]["pct"] = 100.0
+    jobs = quickdl.list_jobs()
+    assert any(x["id"] == jid for x in jobs)
+    with quickdl._LOCK:
+        quickdl._JOBS.pop(jid, None)
+
+
+def test_quickdl_job_cap():
+    from youtube_recorder import quickdl
+    with quickdl._LOCK:
+        quickdl._JOBS.clear()
+    ids = []
+    for i in range(quickdl.MAX_JOBS + 5):
+        jid = quickdl._new_job()
+        with quickdl._LOCK:
+            quickdl._JOBS[jid]["status"] = "done"
+        ids.append(jid)
+    assert len(quickdl._JOBS) <= quickdl.MAX_JOBS
+    with quickdl._LOCK:
+        quickdl._JOBS.clear()
+
+
+def test_download_page_routes():
+    import youtube_recorder.gui as gui
+    cli = gui.app.test_client()
+    r = cli.get("/download")
+    assert r.status_code == 200 and "粘贴链接下载视频" in r.get_data(as_text=True)
+    r2 = cli.post("/download", data={"_csrf": gui.CSRF, "url": "not-a-url", "quality": "1080p"})
+    assert "请粘贴完整" in r2.get_data(as_text=True)
+    r3 = cli.get("/download/jobs.json")
+    assert r3.status_code == 200 and isinstance(r3.get_json(), list)
+    # path traversal guard on reveal
+    r4 = cli.post("/download/reveal", data={"_csrf": gui.CSRF, "path": "/etc/passwd"})
+    assert r4.status_code == 400

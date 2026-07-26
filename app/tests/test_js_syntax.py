@@ -29,7 +29,7 @@ def test_all_page_scripts_parse():
         print("  (node not available — skipped)")
         return
     cl = gui.app.test_client()
-    for page in ("/channels", "/queue", "/reports", "/settings"):
+    for page in ("/channels", "/queue", "/reports", "/settings", "/download"):
         html = cl.get(page).get_data(as_text=True)
         for i, script in enumerate(re.findall(r"<script>(.*?)</script>", html, re.S)):
             p = Path(_TMP) / f"chk-{page.strip('/')}-{i}.js"

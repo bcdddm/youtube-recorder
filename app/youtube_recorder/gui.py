@@ -199,7 +199,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  ::-webkit-scrollbar-track{background:transparent}
 </style></head><body>
 <nav>
- {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('api','API'),('settings','Settings')] %}
+ {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('download','Download'),('api','API'),('settings','Settings')] %}
  <a href="/{{p}}" class="{{'on' if page==p else ''}}">{{l}}</a>{% endfor %}
  <a href=https://github.com/bcdddm/youtube-recorder/issues style='color:var(--dim);padding:4px 8px;text-decoration:none' title=GitHub反馈>💬 反馈</a><button id=themebtn style="margin-left:auto;border:none;background:transparent;color:var(--dim);padding:4px 8px;display:flex;align-items:center"></button>
  <span class="brand" style="margin-left:8px">YouTube Recorder</span>
@@ -697,6 +697,31 @@ EN_MAP = [
     ('阅读 · YouTube Recorder', 'Read · YouTube Recorder'),
     ('涉及标签', 'Tags covered'),
     ('（点一次选中、再点一次从当天全部相关文章删除）', ' (click once to select, again to remove from all related articles that day)'),
+    ('粘贴链接下载视频', 'Paste a link to download video'),
+    ('与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。',
+     'Fully separate from the transcribe/compose pipeline — saves the raw video file locally, no Obsidian write, no article. Works with most sites yt-dlp supports (YouTube, Bilibili, etc.).'),
+    ('粘贴视频链接…', 'Paste a video link…'),
+    ('⬇ 开始下载', '⬇ Start download'),
+    ('最高画质（体积最大）', 'Best quality (largest file)'),
+    ('4K（2160p）', '4K (2160p)'),
+    ('仅音频', 'Audio only'),
+    ('保存设置', 'Save location'),
+    ('保存到', 'Save to'),
+    ('默认清晰度', 'Default quality'),
+    ('当前目录：', 'Current folder: '),
+    ('在 Finder 打开', 'Open in Finder'),
+    ('下载记录', 'Download history'),
+    ('请粘贴完整的视频链接（https://…）', 'Paste a full video link (https://…)'),
+    ('已开始下载，下方列表会自动更新', 'Download started — the list below updates automatically'),
+    ('还没有下载记录', 'No downloads yet'),
+    ('排队中', 'Queued'), ('下载中', 'Downloading'), ('合并中', 'Merging'),
+    ('完成', 'Done'), ('失败', 'Failed'),
+    ('📂 在 Finder 显示', '📂 Show in Finder'),
+    ('剩 ', 'left '),
+    ('已保存', 'Saved'),
+    ('下载 · YouTube Recorder', 'Download · YouTube Recorder'),
+    ('加载中…', 'Loading…'),
+    ('保存</button>', 'Save</button>'),
 ]
 
 
@@ -849,6 +874,131 @@ def channels_import():
     con.commit()
     con.close()
     return redirect("/channels?imp=ok&added=" + str(added) + "&merged=" + str(merged))
+
+
+def _downloads_dest() -> Path:
+    cfg = cfg_mod.load()
+    d = cfg.get("downloads.dest_dir") or str(Path.home() / "Downloads" / "YouTube Recorder")
+    return Path(d).expanduser()
+
+
+@app.route("/download", methods=["GET", "POST"])
+def download_page():
+    from . import quickdl
+    cfg = cfg_mod.load()
+    msg = ""
+    if request.method == "POST":
+        check_csrf()
+        f = request.form
+        if f.get("form") == "settings":
+            dest = f.get("dest_dir", "").strip()
+            q = f.get("default_quality", "1080p")
+            if dest:
+                cfg.data.setdefault("downloads", {})["dest_dir"] = dest
+            if q in quickdl.QUALITY_FORMATS:
+                cfg.data.setdefault("downloads", {})["default_quality"] = q
+            try:
+                cfg_mod.save(cfg)
+                msg = '<span class=ok>已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = f'<span class=bad>{escape(str(e))}</span>'
+            cfg = cfg_mod.load()
+        else:
+            url = f.get("url", "").strip()
+            quality = f.get("quality", cfg.get("downloads.default_quality", "1080p"))
+            if not quickdl.valid_url(url):
+                msg = '<span class=bad>请粘贴完整的视频链接（https://…）</span>'
+            else:
+                quickdl.start_download(url, quality, _downloads_dest())
+                msg = '<span class="st run">已开始下载，下方列表会自动更新</span>'
+    dest = str(_downloads_dest())
+    cur_q = cfg.get("downloads.default_quality", "1080p")
+    qopts = "".join(
+        f'<option value={q} {"selected" if q == cur_q else ""}>{label}</option>'
+        for q, label in [("best", "最高画质（体积最大）"), ("2160p", "4K（2160p）"),
+                         ("1080p", "1080p"), ("720p", "720p"), ("480p", "480p"),
+                         ("audio", "仅音频")])
+    body = f"""<div class=card><svg class=doodle width=96 viewBox="0 0 100 84" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M50 12 v40 M36 38 L50 52 L64 38"/><path d="M20 62 v10 a4 4 0 0 0 4 4 h52 a4 4 0 0 0 4-4 v-10"/></svg>
+<h3>粘贴链接下载视频</h3>
+<p class=dim>与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。</p>
+{f"<p>{msg}</p>" if msg else ""}
+<form method=post style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<input type=hidden name=_csrf value={CSRF}>
+<input name=url placeholder="粘贴视频链接…" style="flex:1;min-width:280px" required>
+<select name=quality>{qopts}</select>
+<button class=primary>⬇ 开始下载</button>
+</form></div>
+
+<div class=card><h3>保存设置</h3>
+<form method=post style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<input type=hidden name=_csrf value={CSRF}><input type=hidden name=form value=settings>
+<span class=dim>保存到</span>
+<input name=dest_dir value="{escape(dest)}" style="flex:1;min-width:260px">
+<span class=dim>默认清晰度</span>
+<select name=default_quality>{qopts}</select>
+<button>保存</button>
+</form>
+<p class=dim style="margin-top:6px">当前目录：<code>{escape(dest)}</code> ·
+<button type=button onclick="window.open('file://{escape(dest)}')" style="font-size:12px;padding:2px 8px">在 Finder 打开</button></p>
+</div>
+
+<div class=card><h3>下载记录</h3><div id=dljobs class=dim>加载中…</div></div>
+<script>
+function _dlfmt(j) {{
+  const st = {{queued:'排队中', downloading:'下载中', merging:'合并中', done:'完成', error:'失败'}}[j.status] || j.status;
+  const bar = (j.status === 'downloading' || j.status === 'merging') ?
+    `<div style="background:var(--card2);border-radius:6px;height:6px;margin:4px 0;overflow:hidden">
+       <div style="background:var(--acc);height:100%;width:${{j.pct}}%"></div></div>` : '';
+  const meta = j.status === 'downloading' ? `${{j.pct}}% · ${{j.speed}} · 剩 ${{j.eta}}` :
+               j.status === 'error' ? `<span class=bad>${{esc(j.error)}}</span>` :
+               j.status === 'done' ? `<button style="font-size:12px;padding:1px 8px" onclick="revealDl('${{esc(j.path)}}')">📂 在 Finder 显示</button>` : '';
+  return `<div style="padding:8px 0;border-bottom:1px solid var(--line)">
+    <div style="display:flex;justify-content:space-between;gap:8px">
+      <span class=t>${{esc(j.title || j.url)}}</span><span class="st ${{j.status==='done'?'ok':j.status==='error'?'bad':'run'}}">${{st}}</span>
+    </div>${{bar}}<div class=dim style="font-size:12px">${{meta}}</div></div>`;
+}}
+function revealDl(path) {{
+  fetch('/download/reveal', {{method:'POST',
+    headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+    body:'_csrf={CSRF}&path=' + encodeURIComponent(path)}});
+}}
+let _dlTimer = null;
+async function pollDl() {{
+  try {{
+    const jobs = await (await fetch('/download/jobs.json')).json();
+    const box = document.getElementById('dljobs');
+    box.innerHTML = jobs.length ? jobs.map(_dlfmt).join('') : '<p class=dim>还没有下载记录</p>';
+    const active = jobs.some(j => j.status === 'downloading' || j.status === 'merging' || j.status === 'queued');
+    clearTimeout(_dlTimer);
+    _dlTimer = setTimeout(pollDl, active ? 1200 : 4000);
+  }} catch (e) {{ _dlTimer = setTimeout(pollDl, 4000); }}
+}}
+pollDl();
+</script>"""
+    return page("下载", "download", body)
+
+
+@app.get("/download/jobs.json")
+def download_jobs_json():
+    from . import quickdl
+    from flask import jsonify
+    return jsonify(quickdl.list_jobs()[:20])
+
+
+@app.post("/download/reveal")
+def download_reveal():
+    check_csrf()
+    path = request.form.get("path", "")
+    dest = _downloads_dest()
+    try:
+        p = Path(path).resolve()
+        p.relative_to(dest.resolve())
+    except (ValueError, OSError):
+        return "", 400
+    if p.exists():
+        import subprocess
+        subprocess.run(["open", "-R", str(p)])
+    return "", 204
 
 
 @app.route("/channels", methods=["GET", "POST"])

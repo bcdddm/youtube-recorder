@@ -697,9 +697,12 @@ EN_MAP = [
     ('阅读 · YouTube Recorder', 'Read · YouTube Recorder'),
     ('涉及标签', 'Tags covered'),
     ('（点一次选中、再点一次从当天全部相关文章删除）', ' (click once to select, again to remove from all related articles that day)'),
+    ('粘贴链接下载视频（<a href=/download>下载页</a>）用到的保存位置与默认清晰度，在此配置。',
+     'Configure the save location and default quality used by paste-a-link download (<a href=/download>Download page</a>) here.'),
     ('粘贴链接下载视频', 'Paste a link to download video'),
-    ('与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。',
-     'Fully separate from the transcribe/compose pipeline — saves the raw video file locally, no Obsidian write, no article. Works with most sites yt-dlp supports (YouTube, Bilibili, etc.).'),
+    ('与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。\n保存位置与默认清晰度在 <a href="/settings#downloads">设置页</a> 修改。当前保存到：',
+     'Fully separate from the transcribe/compose pipeline — saves the raw video file locally, no Obsidian write, no article. Works with most sites yt-dlp supports (YouTube, Bilibili, etc.).\nSave location and default quality can be changed on the <a href="/settings#downloads">Settings page</a>. Currently saving to: '),
+    ('下载设置', 'Download settings'),
     ('粘贴视频链接…', 'Paste a video link…'),
     ('⬇ 开始下载', '⬇ Start download'),
     ('最高画质（体积最大）', 'Best quality (largest file)'),
@@ -890,27 +893,13 @@ def download_page():
     if request.method == "POST":
         check_csrf()
         f = request.form
-        if f.get("form") == "settings":
-            dest = f.get("dest_dir", "").strip()
-            q = f.get("default_quality", "1080p")
-            if dest:
-                cfg.data.setdefault("downloads", {})["dest_dir"] = dest
-            if q in quickdl.QUALITY_FORMATS:
-                cfg.data.setdefault("downloads", {})["default_quality"] = q
-            try:
-                cfg_mod.save(cfg)
-                msg = '<span class=ok>已保存</span>'
-            except cfg_mod.ConfigError as e:
-                msg = f'<span class=bad>{escape(str(e))}</span>'
-            cfg = cfg_mod.load()
+        url = f.get("url", "").strip()
+        quality = f.get("quality", cfg.get("downloads.default_quality", "1080p"))
+        if not quickdl.valid_url(url):
+            msg = '<span class=bad>请粘贴完整的视频链接（https://…）</span>'
         else:
-            url = f.get("url", "").strip()
-            quality = f.get("quality", cfg.get("downloads.default_quality", "1080p"))
-            if not quickdl.valid_url(url):
-                msg = '<span class=bad>请粘贴完整的视频链接（https://…）</span>'
-            else:
-                quickdl.start_download(url, quality, _downloads_dest())
-                msg = '<span class="st run">已开始下载，下方列表会自动更新</span>'
+            quickdl.start_download(url, quality, _downloads_dest())
+            msg = '<span class="st run">已开始下载，下方列表会自动更新</span>'
     dest = str(_downloads_dest())
     cur_q = cfg.get("downloads.default_quality", "1080p")
     qopts = "".join(
@@ -920,7 +909,8 @@ def download_page():
                          ("audio", "仅音频")])
     body = f"""<div class=card><svg class=doodle width=96 viewBox="0 0 100 84" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M50 12 v40 M36 38 L50 52 L64 38"/><path d="M20 62 v10 a4 4 0 0 0 4 4 h52 a4 4 0 0 0 4-4 v-10"/></svg>
 <h3>粘贴链接下载视频</h3>
-<p class=dim>与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。</p>
+<p class=dim>与转录/整理管线完全独立——直接把原始视频文件存到本地，不进 Obsidian、不生成文章。支持 yt-dlp 能识别的绝大多数网站（YouTube、B站等）。
+保存位置与默认清晰度在 <a href="/settings#downloads">设置页</a> 修改。当前保存到：<code>{escape(dest)}</code></p>
 {f"<p>{msg}</p>" if msg else ""}
 <form method=post style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
 <input type=hidden name=_csrf value={CSRF}>
@@ -928,19 +918,6 @@ def download_page():
 <select name=quality>{qopts}</select>
 <button class=primary>⬇ 开始下载</button>
 </form></div>
-
-<div class=card><h3>保存设置</h3>
-<form method=post style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input type=hidden name=_csrf value={CSRF}><input type=hidden name=form value=settings>
-<span class=dim>保存到</span>
-<input name=dest_dir value="{escape(dest)}" style="flex:1;min-width:260px">
-<span class=dim>默认清晰度</span>
-<select name=default_quality>{qopts}</select>
-<button>保存</button>
-</form>
-<p class=dim style="margin-top:6px">当前目录：<code>{escape(dest)}</code> ·
-<button type=button onclick="window.open('file://{escape(dest)}')" style="font-size:12px;padding:2px 8px">在 Finder 打开</button></p>
-</div>
 
 <div class=card><h3>下载记录</h3><div id=dljobs class=dim>加载中…</div></div>
 <script>
@@ -2611,7 +2588,6 @@ window.addEventListener('load', () => setTimeout(updateHint, 2500));
     return page("阅读", "reports", body)
 
 
-@app.post("/reports/<video_id>/tag-remove")
 def _remove_article_tag(video_id: str, tag: str) -> bool:
     """从某篇文章的 article.json 移除标签，并同步 Obsidian 笔记 frontmatter。
     返回是否实际删除（幂等：本就没有则 False）。"""
@@ -2657,6 +2633,7 @@ def _remove_article_tag(video_id: str, tag: str) -> bool:
     return True
 
 
+@app.post("/reports/<video_id>/tag-remove")
 def report_tag_remove(video_id: str):
     check_csrf()
     tag = (request.form.get("tag") or "").strip()
@@ -2979,6 +2956,20 @@ def settings():
                     msg += (f'<span class=ok>{prov} key 已存入钥匙串</span> '
                             if r.returncode == 0 else
                             f'<span class=bad>{prov} 保存失败</span> ')
+        elif f.get("form") == "downloads":
+            from . import quickdl
+            dest = f.get("dest_dir", "").strip()
+            q = f.get("default_quality", "1080p")
+            if dest:
+                cfg.data.setdefault("downloads", {})["dest_dir"] = dest
+            if q in quickdl.QUALITY_FORMATS:
+                cfg.data.setdefault("downloads", {})["default_quality"] = q
+            try:
+                cfg_mod.save(cfg)
+                msg = '<span class=ok>下载设置已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = f'<span class=bad>{escape(str(e))}</span>'
+            cfg = cfg_mod.load()
         else:
             hours = sorted(int(h) for h in f.getlist("hour"))
             cfg.data.setdefault("scheduler", {})["hours"] = hours
@@ -3201,6 +3192,21 @@ def settings():
 </table>
 <p><button class=primary>保存全部设置</button></p></div>
 </form>
+
+<div class=card id=downloads><h3>下载设置</h3>
+<p class=dim>粘贴链接下载视频（<a href=/download>下载页</a>）用到的保存位置与默认清晰度，在此配置。</p>
+<form method=post style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+<input type=hidden name=_csrf value={CSRF}><input type=hidden name=form value=downloads>
+<span class=dim>保存到</span>
+<input name=dest_dir value="{escape(str(cfg.get('downloads.dest_dir', '')))}" style="flex:1;min-width:260px">
+<span class=dim>默认清晰度</span>
+<select name=default_quality>{"".join(
+    f'<option value={q} {"selected" if q == cfg.get("downloads.default_quality", "1080p") else ""}>{label}</option>'
+    for q, label in [("best", "最高画质（体积最大）"), ("2160p", "4K（2160p）"),
+                     ("1080p", "1080p"), ("720p", "720p"), ("480p", "480p"),
+                     ("audio", "仅音频")])}</select>
+<button>保存</button>
+</form></div>
 
 <div class=card><h3>⑥ AI / API</h3><p class=dim>AI 凭证与分工、Qwen/Kimi、语音识别接口已移到独立的 <a href=/api>API 页</a>，让设置更清爽。</p></div>"""
     return page("设置", "settings", body)

@@ -344,3 +344,43 @@ def test_download_page_routes():
     # path traversal guard on reveal
     r4 = cli.post("/download/reveal", data={"_csrf": gui.CSRF, "path": "/etc/passwd"})
     assert r4.status_code == 400
+
+
+def test_friendly_error_classification():
+    from youtube_recorder import quickdl
+    # 已知模式命中 -> 具体中文原因
+    assert "不可用" in quickdl._friendly_error("ERROR: Video unavailable", True)
+    assert "私享" in quickdl._friendly_error("This video is private", True)
+    assert "年龄限制" in quickdl._friendly_error("Sign in to confirm your age", True)
+    assert "地区" in quickdl._friendly_error("The uploader has not made this video available in your country, blocked it in your country", True)
+    assert "清晰度" in quickdl._friendly_error("Requested format is not available", True)
+    assert "ffmpeg" in quickdl._friendly_error("ffmpeg not found on path", True)
+    assert "网络" in quickdl._friendly_error("Connection timed out", True)
+    # 未识别模式 -> 按 parsed_ok 前缀区分"解析失败"/"下载失败"
+    parse_msg = quickdl._friendly_error("some totally unknown yt-dlp internal error xyz", False)
+    assert parse_msg.startswith("解析失败：")
+    dl_msg = quickdl._friendly_error("some totally unknown yt-dlp internal error xyz", True)
+    assert dl_msg.startswith("下载失败：")
+
+
+def test_settings_downloads_form_relocated():
+    import youtube_recorder.gui as gui
+    cli = gui.app.test_client()
+    dl_html = cli.get("/download").get_data(as_text=True)
+    # 下载页不再直接托管保存位置/清晰度表单，只留一条到设置页的说明链接
+    assert 'name=form value=settings' not in dl_html
+    assert '/settings#downloads' in dl_html
+
+    st_html = cli.get("/settings").get_data(as_text=True)
+    assert 'id=downloads' in st_html
+    assert 'name=form value=downloads' in st_html
+
+    r = cli.post("/settings", data={
+        "_csrf": gui.CSRF, "form": "downloads",
+        "dest_dir": "/tmp/ytrec-download-test", "default_quality": "720p",
+    })
+    assert r.status_code == 200
+    from youtube_recorder import config as cfg_mod
+    cfg = cfg_mod.load()
+    assert cfg.get("downloads.dest_dir") == "/tmp/ytrec-download-test"
+    assert cfg.get("downloads.default_quality") == "720p"

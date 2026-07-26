@@ -74,7 +74,47 @@ def start_download(url: str, quality: str, dest_dir: Path) -> str:
     return jid
 
 
+_ERROR_PATTERNS = [
+    # (匹配子串, 用户可读原因)
+    ("Unsupported URL", "无法识别这个链接（不是可下载的视频页面，或该网站暂不支持）"),
+    ("is not a valid URL", "链接格式不正确"),
+    ("Unable to extract", "无法解析该页面的视频信息（页面结构可能已变化或非视频页）"),
+    ("Video unavailable", "视频不可用（可能已被删除、下架或地区限制）"),
+    ("Private video", "这是私享视频，无法下载"),
+    ("This video is private", "这是私享视频，无法下载"),
+    ("Sign in to confirm", "该视频需要登录验证（年龄限制等），暂不支持"),
+    ("age", "该视频有年龄限制，暂不支持"),
+    ("members-only", "这是会员专属内容，无法下载"),
+    ("copyright", "该内容因版权原因不可下载"),
+    ("blocked it in your country", "该视频在你所在地区不可用"),
+    ("live event will begin", "这是尚未开始的直播预告，暂无法下载"),
+    ("HTTP Error 404", "找不到该视频（链接可能已失效）"),
+    ("HTTP Error 403", "被目标网站拒绝访问（403）"),
+    ("Requested format is not available", "找不到符合所选清晰度的视频流，请换一档清晰度重试"),
+    ("ffmpeg not found", "缺少 ffmpeg，无法合并音视频"),
+    ("No space left", "磁盘空间不足"),
+    ("磁盘空间不足", "磁盘空间不足"),
+    ("Name or service not known", "网络连接失败（DNS 解析失败），请检查网络"),
+    ("Temporary failure in name resolution", "网络连接失败，请检查网络"),
+    ("timed out", "网络连接超时，请检查网络后重试"),
+    ("Connection refused", "网络连接被拒绝，请稍后重试"),
+]
+
+
+def _friendly_error(raw: str, parsed_ok: bool) -> str:
+    """把 yt-dlp/系统异常翻成用户能看懂的中文原因；parsed_ok=False 表示
+    连视频信息都没解析出来（用于区分"解析失败"还是"下载失败"）。"""
+    for pat, human in _ERROR_PATTERNS:
+        if pat.lower() in (raw or "").lower():
+            return human
+    prefix = "解析失败" if not parsed_ok else "下载失败"
+    detail = (raw or "未知错误").strip().splitlines()[0][:180]
+    return f"{prefix}：{detail}"
+
+
 def _run(jid: str, url: str, quality: str, dest_dir: Path) -> None:
+    parsed_ok = {"v": False}  # extract_info 是否成功拿到过视频信息
+
     def hook(d: dict) -> None:
         with _LOCK:
             j = _JOBS.get(jid)
@@ -112,6 +152,7 @@ def _run(jid: str, url: str, quality: str, dest_dir: Path) -> None:
         }
         with yt_dlp.YoutubeDL({k: v for k, v in opts.items() if v is not None}) as ydl:
             info = ydl.extract_info(url, download=True)
+            parsed_ok["v"] = True
             fname = ydl.prepare_filename(info)
             # merge_output_format 可能改变最终扩展名
             p = Path(fname)
@@ -132,4 +173,4 @@ def _run(jid: str, url: str, quality: str, dest_dir: Path) -> None:
             j = _JOBS.get(jid)
             if j:
                 j["status"] = "error"
-                j["error"] = str(e)[:300]
+                j["error"] = _friendly_error(str(e), parsed_ok["v"])

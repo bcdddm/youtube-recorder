@@ -38,8 +38,9 @@ def test_state_machine():
     st.guard_transition(st.DISCOVERED, st.METADATA_READY)
     st.guard_transition(st.CAPTION_CHECK, st.AUDIO_QUEUED)
     st.guard_transition(st.FAILED, st.AWAITING_TRANSCRIPTION)  # retry path
+    st.guard_transition(st.IGNORED, st.DISCOVERED)  # 用户"取消跳过"重新处理
     for bad in [(st.DISCOVERED, st.WRITTEN), (st.VERIFIED, st.DISCOVERED),
-                (st.AUDIO_QUEUED, st.TRANSCRIPT_READY)]:
+                (st.IGNORED, st.VERIFIED), (st.AUDIO_QUEUED, st.TRANSCRIPT_READY)]:
         try:
             st.guard_transition(*bad)
             raise AssertionError(f"illegal transition allowed: {bad}")

@@ -471,3 +471,27 @@ def test_maybe_autogenerate_digest():
         assert cache.read_text(encoding="utf-8") == "刷新后的日报正文。"
     finally:
         providers.complete_long = orig
+
+
+def test_queue_unskip_ignored_video():
+    """已跳过（ignored）的视频在 Queue 页可以"取消跳过"重新执行——
+    对应用户需求：序列中被 skip 掉的内容也要能点回来、执行回来。"""
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder import state as st
+
+    con = gui._con()
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCunskip','','u',1,?)", (dbm.now(),))
+    dbm.upsert_discovered(con, "unskip1", "UCunskip", "t", None)
+    dbm.set_status(con, "unskip1", st.IGNORED, error_code="user_skip")
+    con.commit(); con.close()
+
+    cli = gui.app.test_client()
+    r = cli.post("/queue", data={"_csrf": gui.CSRF, "retry": "unskip1"})
+    assert r.status_code == 200
+
+    con = gui._con()
+    v = dbm.get_video(con, "unskip1")
+    con.close()
+    assert v["status"] == st.DISCOVERED

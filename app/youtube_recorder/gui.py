@@ -416,7 +416,7 @@ EN_MAP = [
     ("详情", "Detail"), ("更新于", "Updated"),
     ("立即运行（强制刷新数据）", "Run now (force refresh)"),
     ("粘贴单个视频链接，直接处理…", "Paste a video link to process it…"),
-    ("＋添加", "＋Add"), ("重试", "Retry"), ("跳过", "Skip"),
+    ("＋添加", "＋Add"), ("重试", "Retry"), ("↩ 取消跳过", "↩ Unskip"), ("跳过", "Skip"),
     ("已发现", "Found"), ("已探测", "Probed"), ("查字幕", "Captions?"),
     ("下载音频", "Downloading"), ("MacWhisper 转录中", "Transcribing"),
     ("文稿就绪", "Transcript ready"), ("文章已生成", "Article ready"),
@@ -1450,7 +1450,7 @@ def queue():
                     pass  # already terminal / being written — too late to skip
         elif f.get("retry"):
             v = dbm.get_video(con, f["retry"])
-            if v and v["status"] in (st.FAILED, st.DEAD_LETTER):
+            if v and v["status"] in (st.FAILED, st.DEAD_LETTER, st.IGNORED):
                 dbm.set_status(con, f["retry"], f.get("stage", st.DISCOVERED))
             elif v and v["status"] not in st.TERMINAL_STAGES:
                 try:
@@ -1521,6 +1521,7 @@ async function refresh() {{
       const _isStuck = running.includes(v.status) && _stuckMin >= 10;
       if (v.status==='failed'||v.status==='dead_letter')
         act = btn('retry',v.video_id,'重试');
+      else if (v.status==='ignored') act = btn('retry',v.video_id,'↩ 取消跳过');
       else if (_isStuck) act = btn('retry',v.video_id,'重新运行');
       const skippable = ['discovered','metadata_ready','caption_check','audio_queued',
                          'awaiting_transcription','transcript_ready','article_ready'];

@@ -52,7 +52,7 @@ TRANSITIONS: dict[str, tuple[str, ...]] = {
     PACKAGE_READY: (WRITTEN, FAILED),
     WRITTEN: (VERIFIED, FAILED),
     VERIFIED: (TRANSCRIPT_READY,),  # 用户主动"重新总结"时回到成文起点
-    IGNORED: (),
+    IGNORED: (DISCOVERED,),  # 用户主动"取消跳过"，回到发现起点重新处理
     FAILED: tuple(set(_FAILABLE)) + (DEAD_LETTER,),  # retry from a safe stage, or give up
     DEAD_LETTER: (DISCOVERED,),  # manual resurrection only
 }

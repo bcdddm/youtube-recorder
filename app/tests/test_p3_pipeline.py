@@ -137,6 +137,23 @@ def test_pipeline_ignore_and_permanent():
     con.close()
 
 
+def test_trigger_auto_digest_hook():
+    """run_once 结尾的自动日报钩子：只有本轮确实写入了新文章
+    （stats.vault_written > 0）才会调用 gui.maybe_autogenerate_digest；
+    实际的阈值/去重判断在 gui 那边单独测试（test_p9_gui.py）。"""
+    con, cfg, log = _setup()
+    stats = pipeline.RunStats()
+    calls = []
+    with mock.patch("youtube_recorder.gui.maybe_autogenerate_digest",
+                     side_effect=lambda log=None: calls.append(1)):
+        pipeline._trigger_auto_digest(stats, log)
+        assert calls == [], "没有新写入不该触发"
+        stats.vault_written = 3
+        pipeline._trigger_auto_digest(stats, log)
+        assert calls == [1], "有新写入应该触发一次"
+    con.close()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

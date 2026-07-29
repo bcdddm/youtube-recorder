@@ -384,3 +384,90 @@ def test_settings_downloads_form_relocated():
     cfg = cfg_mod.load()
     assert cfg.get("downloads.dest_dir") == "/tmp/ytrec-download-test"
     assert cfg.get("downloads.default_quality") == "720p"
+
+
+def test_maybe_autogenerate_digest():
+    """当天（全部组）文章数达到 3 篇才自动后台生成日报；未新增内容时
+    不重复调用 AI；有新增内容达到阈值后会用 force 刷新缓存。"""
+    import json, os
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder import providers
+    from youtube_recorder.paths import work_dir
+
+    root = os.path.join(os.environ["YTREC_HOME"], "vault-auto")
+    os.makedirs(root, exist_ok=True)
+    c = cfg_mod.load(); c.data["vault"]["root"] = root; cfg_mod.save(c)
+
+    today = dbm.local_date(dbm.now())
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCauto','','auto',1,?)", (dbm.now(),))
+
+    def _seed(vid):
+        dbm.upsert_discovered(con, vid, "UCauto", vid, dbm.now())
+        con.execute("UPDATE videos SET published_at=? WHERE video_id=?", (dbm.now(), vid))
+        note = os.path.join(root, vid + ".md")
+        open(note, "w", encoding="utf-8").write('---\ntags: []\n---\n# t\n正文内容。\n')
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
+                    "VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "article.json").write_text(json.dumps(
+            {"title_zh": vid, "tags": [], "summary": "s", "sections": []}, ensure_ascii=False))
+
+    # 只有 2 篇时不应触发
+    _seed("auto1"); _seed("auto2")
+    con.commit(); con.close()
+
+    calls = []
+
+    def fake_complete_long(cfg, con_, vid, sys_, user_, **kw):
+        calls.append(1)
+        return "生成的日报正文。"
+
+    orig = providers.complete_long
+    providers.complete_long = fake_complete_long
+    try:
+        cache = gui._digest_cache_path(today, "")
+        cache.unlink(missing_ok=True)
+        state_path = gui._digest_auto_state_path()
+        state_path.unlink(missing_ok=True)
+
+        t = gui.maybe_autogenerate_digest()
+        t.join(timeout=10)
+        assert len(calls) == 0, "只有 2 篇不该触发自动生成"
+        assert not cache.exists()
+
+        # 第 3 篇到达，跨过阈值 -> 应该自动生成
+        con = gui._con()
+        _seed("auto3")
+        con.commit(); con.close()
+
+        t = gui.maybe_autogenerate_digest()
+        t.join(timeout=10)
+        assert len(calls) == 1, "满 3 篇应触发一次自动生成"
+        assert cache.exists()
+        assert cache.read_text(encoding="utf-8") == "生成的日报正文。"
+
+        # 没有新增内容 -> 不应重复生成
+        t = gui.maybe_autogenerate_digest()
+        t.join(timeout=10)
+        assert len(calls) == 1, "内容没变化不该重复调用 AI"
+
+        # 第 4 篇到达 -> 应刷新缓存
+        con = gui._con()
+        _seed("auto4")
+        con.commit(); con.close()
+
+        def fake_complete_long2(cfg, con_, vid, sys_, user_, **kw):
+            calls.append(1)
+            return "刷新后的日报正文。"
+        providers.complete_long = fake_complete_long2
+
+        t = gui.maybe_autogenerate_digest()
+        t.join(timeout=10)
+        assert len(calls) == 2, "有新增内容应重新生成一次"
+        assert cache.read_text(encoding="utf-8") == "刷新后的日报正文。"
+    finally:
+        providers.complete_long = orig

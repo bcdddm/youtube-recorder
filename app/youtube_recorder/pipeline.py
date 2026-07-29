@@ -552,4 +552,19 @@ def run_once(con, cfg, log, *, headless: bool = False) -> RunStats:
     purged = trash.purge_expired(cfg.get("retention.trash_days", 3))
     if purged:
         log.event("trash_purged", detail=f"{purged} expired entries")
+
+    _trigger_auto_digest(stats, log)
     return stats
+
+
+def _trigger_auto_digest(stats: RunStats, log) -> None:
+    """本轮写入了新文章时，触发后台日报自动生成检查（当天全部组文章数
+    超过 2 篇才会真正生成，见 gui.maybe_autogenerate_digest 的阈值/去重逻辑）。
+    独立成函数便于单测，不需要跑完整 run_once。"""
+    if stats.vault_written <= 0:
+        return
+    try:
+        from . import gui as _gui
+        _gui.maybe_autogenerate_digest(log)
+    except Exception as e:
+        log.event("digest_autogen_hook_failed", detail=str(e))

@@ -71,6 +71,25 @@ def test_db_lifecycle():
     con.close()
 
 
+def test_videos_by_status_oldest_first():
+    """oldest_first=True 按 created_at 正序（FIFO），默认仍是 published_at
+    倒序——process_discovered 用前者避免旧视频被新发现永远挤到批次外。"""
+    con = dbm.connect()
+    dbm.add_channel(con, "UColdfirst01", "https://youtube.com/@of", "OF")
+    dbm.upsert_discovered(con, "of_old", "UColdfirst01", "old", "2026-07-01T00:00:00Z")
+    con.execute("UPDATE videos SET created_at=? WHERE video_id=?",
+               ("2020-01-01T00:00:00Z", "of_old"))
+    dbm.upsert_discovered(con, "of_new", "UColdfirst01", "new", "2026-07-30T00:00:00Z")
+    con.commit()
+
+    default_order = dbm.videos_by_status(con, st.DISCOVERED, limit=1)
+    assert default_order[0]["video_id"] == "of_new"  # published_at 倒序：新的在前
+
+    fifo_order = dbm.videos_by_status(con, st.DISCOVERED, limit=1, oldest_first=True)
+    assert fifo_order[0]["video_id"] == "of_old"  # created_at 正序：旧的在前
+    con.close()
+
+
 def test_lock_mutex():
     results = []
     with ProcessLock():

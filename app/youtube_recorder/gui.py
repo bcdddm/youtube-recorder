@@ -1458,7 +1458,7 @@ def queue():
                     dbm.set_status(con, f["retry"], st.DISCOVERED)
                 except st.TransitionError:
                     pass
-        if f.get("approve") or f.get("approve_all"):
+        if f.get("approve") or f.get("approve_all") or f.get("retry"):
             con.close()
             return redirect(url_for("run_now_get"))
     started = ('<span class=ok id=started>已触发运行，下方列表会自动更新</span>'

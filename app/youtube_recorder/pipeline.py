@@ -126,7 +126,7 @@ def process_discovered(con, cfg, log, stats: RunStats) -> None:
     gate = cfg.get("discovery.review_gate", True)
     batch = dbm.videos_by_status(con, st.DISCOVERED,
                                  limit=cfg.get("discovery.max_new_videos_per_run", 5),
-                                 approved_only=gate)
+                                 approved_only=gate, oldest_first=True)
     if gate:
         pending = con.execute(
             "SELECT COUNT(*) n FROM videos WHERE status=? AND approved=0",

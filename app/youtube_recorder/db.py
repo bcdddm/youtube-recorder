@@ -271,11 +271,17 @@ def set_status(con, video_id: str, new_status: str, *,
 
 
 def videos_by_status(con, status: str, limit: int = 100,
-                     approved_only: bool = False) -> list[sqlite3.Row]:
+                     approved_only: bool = False,
+                     oldest_first: bool = False) -> list[sqlite3.Row]:
+    """oldest_first=True 按 created_at 正序（先发现先处理，FIFO）——用于有
+    per-run 数量上限的批次查询，避免旧的（含手动"取消跳过"复活的）视频被
+    源源不断的新发现挤到后面、永远排不上号（0.4.19 之后发现的饥饿问题）。
+    默认仍是 published_at 倒序，不影响其它无上限批次调用方。"""
     q = ("SELECT * FROM videos WHERE status=? AND (run_after IS NULL OR run_after<=?)")
     if approved_only:
         q += " AND approved=1"
-    return con.execute(q + " ORDER BY published_at DESC LIMIT ?",
+    order = "created_at ASC" if oldest_first else "published_at DESC"
+    return con.execute(q + f" ORDER BY {order} LIMIT ?",
                        (status, now(), limit)).fetchall()
 
 

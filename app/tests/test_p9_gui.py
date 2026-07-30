@@ -475,7 +475,9 @@ def test_maybe_autogenerate_digest():
 
 def test_queue_unskip_ignored_video():
     """已跳过（ignored）的视频在 Queue 页可以"取消跳过"重新执行——
-    对应用户需求：序列中被 skip 掉的内容也要能点回来、执行回来。"""
+    对应用户需求：序列中被 skip 掉的内容也要能点回来、执行回来。
+    取消跳过和 approve 一样会重定向去触发一次立即运行（而不是等下一次
+    排班），避免用户点了却看着它一直"卡在第一步"没反应。"""
     import youtube_recorder.gui as gui
     from youtube_recorder import db as dbm
     from youtube_recorder import state as st
@@ -488,8 +490,11 @@ def test_queue_unskip_ignored_video():
     con.commit(); con.close()
 
     cli = gui.app.test_client()
+    # 不 follow_redirects：run_now_get() 会真的 subprocess.Popen 拉起 CLI，
+    # 单测里只需确认它确实触发了重定向，不需要真的跑一遍管线。
     r = cli.post("/queue", data={"_csrf": gui.CSRF, "retry": "unskip1"})
-    assert r.status_code == 200
+    assert r.status_code == 302
+    assert "run-now-redirect" in r.headers.get("Location", "")
 
     con = gui._con()
     v = dbm.get_video(con, "unskip1")

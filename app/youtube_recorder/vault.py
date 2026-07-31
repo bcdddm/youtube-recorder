@@ -184,6 +184,7 @@ created: {now()[:10]}
 updated: {now()[:10]}
 status: auto-draft
 tags: {_yaml_list(art.get('tags'))}
+companies: {_yaml_list(art.get('companies'))}
 youtube_video_id: {video_id}
 channel: "{safe_name(channel)}"
 published: {published or ""}

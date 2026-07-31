@@ -155,6 +155,8 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .tagchip:hover{border-color:var(--acc);color:var(--acc)}
  .tagchip.on{background:var(--acc);color:var(--acctext);border-color:var(--acc)}
  .tagchip.arm{background:#e5484d;color:#fff;border-color:#e5484d}
+ .tagchip.co{border-style:dashed}
+ .tagchip.co.on{background:#6b7a8f;border-color:#6b7a8f;color:#fff}
  .grpbar{position:sticky;top:52px;z-index:8}
  .busy{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99;
    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
@@ -1662,12 +1664,16 @@ def reports_json():
     out = []
     for r in rows:
         tags = []
+        companies = []
         try:
             aj = work_dir(r["video_id"]) / "article.json"
             if aj.exists():
+                art_data = _json.loads(aj.read_text(encoding="utf-8"))
                 tags = [t for t in _merge_tags(
-                    _json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6], tmap)
+                    art_data.get("tags", [])[:6], tmap)
                     if t not in hidden]
+                companies = [c for c in art_data.get("companies", [])[:6]
+                            if isinstance(c, str) and c.strip()]
         except Exception:
             pass
         out.append({
@@ -1678,6 +1684,7 @@ def reports_json():
             "generated": dbm.local_date(r["at"]),
             "duration_sec": r["duration_sec"] or 0,
             "tags": tags,
+            "companies": companies,
             "grps": _grps_of(r["cgrp"]) if "cgrp" in r.keys() else [],
         })
     con.close()
@@ -2271,6 +2278,10 @@ _REPORTS_TMPL = """
 <input type=checkbox id=dropOrphan> 移除孤儿标签（仅 1 篇文章用到）</label>
 <button id=mtbtn
  style="font-size:11px;padding:1px 8px" onclick="mergeTags()">🏷 AI 归并同义标签</button></div></div>
+<div class=card id=cobar style="display:none;padding:10px 14px 8px;overflow:visible">
+<div class=tagwrap><div class=taginner>
+<span class=dim style="margin-right:6px">公司/实体：</span><span id=companies></span>
+</div></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
 <table><thead><tr><th>标题</th><th>删除于</th><th>剩余</th><th></th></tr></thead>
@@ -2279,7 +2290,7 @@ _REPORTS_TMPL = """
 <script>
 const CSRF_T = "__CSRF__";
 let DATA = [], MODE = 'timeline';
-let TAGS = new Set(), GRPS = new Set();
+let TAGS = new Set(), GRPS = new Set(), COMPANIES = new Set();
 function esc(s) { return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
 function dur(s) { if(!s) return ''; const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
   return h? h+'小时'+m+'分' : m+'分钟'; }
@@ -2289,13 +2300,16 @@ function filtered() {
   return DATA.filter(r => (!q || r.title.toLowerCase().includes(q) || r.channel.toLowerCase().includes(q))
                        && (!ch || r.channel === ch)
                        && (!GRPS.size || ((r.grps&&r.grps.length) ? r.grps.some(g=>GRPS.has(g)) : GRPS.has('')))
-                       && (!TAGS.size || (r.tags||[]).some(t=>TAGS.has(t))));
+                       && (!TAGS.size || (r.tags||[]).some(t=>TAGS.has(t)))
+                       && (!COMPANIES.size || (r.companies||[]).some(c=>COMPANIES.has(c))));
 }
 function tagsHtml(r) {
-  return (r.tags||[]).map(t=>`<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}');event.stopPropagation()">${esc(t)}</span>`).join('');
+  return (r.tags||[]).map(t=>`<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}');event.stopPropagation()">${esc(t)}</span>`).join('')
+    + (r.companies||[]).map(c=>`<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}');event.stopPropagation()">🏢 ${esc(c)}</span>`).join('');
 }
 function setTag(t) { TAGS.has(t) ? TAGS.delete(t) : TAGS.add(t); render(); }
 function setGrp(g) { GRPS.has(g) ? GRPS.delete(g) : GRPS.add(g); render(); }
+function setCompany(c) { COMPANIES.has(c) ? COMPANIES.delete(c) : COMPANIES.add(c); render(); }
 function item(r) {
   return `<tr><td class=t title="${esc(r.title)}"><div class=clamp><a href="/reports/${esc(r.video_id)}" style="color:var(--acc);text-decoration:none">${esc(r.title)}</a></div>${tagsHtml(r)}</td>
   <td class=dim>${esc(r.channel)}</td><td class=dim>${esc(r.published)}</td>
@@ -2390,7 +2404,8 @@ function render() {
   const scope = [...GRPS].join('+');
   document.getElementById('count').textContent =
     `${rows.length} 篇` + (scope ? ` · 组:${scope}` : '') +
-    (TAGS.size ? ` · #${[...TAGS].join(' #')}` : '');
+    (TAGS.size ? ` · #${[...TAGS].join(' #')}` : '') +
+    (COMPANIES.size ? ` · 🏢${[...COMPANIES].join(' 🏢')}` : '');
   // 标签栏
   const all = new Set(); DATA.forEach(r=>(r.tags||[]).forEach(t=>all.add(t)));
   const tb = document.getElementById('tagbar');
@@ -2398,6 +2413,12 @@ function render() {
   document.getElementById('tags').innerHTML = [...all].sort().map(t=>
     `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
   layoutTags();
+  // 公司/实体栏（独立于概念标签，不参与 AI 归并）
+  const allCo = new Set(); DATA.forEach(r=>(r.companies||[]).forEach(c=>allCo.add(c)));
+  const cb = document.getElementById('cobar');
+  cb.style.display = allCo.size ? '' : 'none';
+  document.getElementById('companies').innerHTML = [...allCo].sort().map(c=>
+    `<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}')">${esc(c)}</span>`).join('');
   // 组胶囊（置顶排，多选）
   const gAll = [...new Set(DATA.flatMap(r=>r.grps||[]))].sort();
   const gc = document.getElementById('grpcard');
@@ -2534,11 +2555,15 @@ def report_view(video_id: str):
     import json as _tj
     from .paths import work_dir as _wd
     _atags = []
+    _acompanies = []
     try:
         _aj = _wd(video_id) / "article.json"
         if _aj.exists():
-            _atags = [t for t in _tj.loads(_aj.read_text(encoding="utf-8")).get("tags", [])
+            _art_data = _tj.loads(_aj.read_text(encoding="utf-8"))
+            _atags = [t for t in _art_data.get("tags", [])
                       if isinstance(t, str) and t.strip()]
+            _acompanies = [c for c in _art_data.get("companies", [])
+                          if isinstance(c, str) and c.strip()]
     except Exception:
         _atags = []
     tags_html = ""
@@ -2550,6 +2575,13 @@ def report_view(video_id: str):
             '<div class=card style="padding:10px 14px"><span class=dim '
             'style="margin-right:8px">标签（点一次选中、再点一次删除）：</span>'
             '<span id=tagedit>' + chips + '</span></div>')
+    if _acompanies:
+        co_chips = "".join(
+            '<span class="tagchip co">' + str(escape(c)) + '</span>'
+            for c in _acompanies)
+        tags_html += (
+            '<div class=card style="padding:10px 14px"><span class=dim '
+            'style="margin-right:8px">公司/实体：</span>' + co_chips + '</div>')
     answer = request.args.get("_answer", "")
     ans_html = ""
     if answer:
@@ -2658,13 +2690,18 @@ window.addEventListener('load', () => setTimeout(updateHint, 2500));
     return page("阅读", "reports", body)
 
 
-def _write_article_tags(video_id: str, art: dict, tags: list) -> None:
-    """把新的标签列表写回 article.json 并原子替换，同步 Obsidian 笔记
-    frontmatter 的 tags 行（找不到笔记或不在库内则安静跳过）。"""
+def _write_article_tags(video_id: str, art: dict, tags: list,
+                        companies: list | None = None) -> None:
+    """把新的标签（及可选的公司/实体列表）写回 article.json 并原子替换，
+    同步 Obsidian 笔记 frontmatter 的 tags/companies 行——老笔记还没有
+    companies 行的话，在 tags 行后面插入一行（找不到笔记或不在库内则
+    安静跳过）。"""
     from .paths import work_dir
     import json as _j
     aj = work_dir(video_id) / "article.json"
     art["tags"] = tags
+    if companies is not None:
+        art["companies"] = companies
     tmp = aj.with_suffix(".json.tmp")
     tmp.write_text(_j.dumps(art, ensure_ascii=False), encoding="utf-8")
     tmp.replace(aj)
@@ -2684,6 +2721,14 @@ def _write_article_tags(video_id: str, art: dict, tags: list) -> None:
                 txt = np.read_text(encoding="utf-8")
                 new_line = "tags: " + _vault._yaml_list(tags)
                 txt2 = _re.sub(r"(?m)^tags: .*$", new_line, txt, count=1)
+                if companies is not None:
+                    comp_line = "companies: " + _vault._yaml_list(companies)
+                    if _re.search(r"(?m)^companies: .*$", txt2):
+                        txt2 = _re.sub(r"(?m)^companies: .*$", comp_line, txt2, count=1)
+                    else:
+                        txt2 = _re.sub(r"(?m)^(tags: .*)$",
+                                      lambda m: m.group(1) + "\n" + comp_line,
+                                      txt2, count=1)
                 if txt2 != txt:
                     ntmp = np.with_suffix(".md.tmp")
                     ntmp.write_text(txt2, encoding="utf-8")
@@ -2748,6 +2793,47 @@ def rename_tags_everywhere(mapping: dict) -> dict:
     changed = []
     for r in rows:
         if _rename_article_tags(r["video_id"], mapping):
+            changed.append(r["video_id"])
+    return {"articles_changed": len(changed), "video_ids": changed}
+
+
+def _split_article_companies(video_id: str, entity_set: set) -> bool:
+    """把某篇文章 tags 里属于 entity_set（公司/股票代码/具名人物/具名产品）
+    的项目挪到 companies 字段（去重保序，已有 companies 的追加合并），
+    tags 只保留剩下的概念标签。返回是否有实际变化（幂等）。"""
+    from .paths import work_dir
+    import json as _j
+    aj = work_dir(video_id) / "article.json"
+    if not aj.exists():
+        return False
+    try:
+        art = _j.loads(aj.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    orig_tags = art.get("tags") or []
+    orig_companies = art.get("companies") or []
+    new_tags = [t for t in orig_tags if not (isinstance(t, str) and t in entity_set)]
+    moved = [t for t in orig_tags if isinstance(t, str) and t in entity_set]
+    new_companies = list(orig_companies)
+    for c in moved:
+        if c not in new_companies:
+            new_companies.append(c)
+    if new_tags == orig_tags and new_companies == orig_companies:
+        return False
+    _write_article_tags(video_id, art, new_tags, companies=new_companies)
+    return True
+
+
+def split_companies_everywhere(entity_set: set) -> dict:
+    """对全部已写入 wiki 笔记的文章执行公司/实体标签拆分（见
+    _split_article_companies）。返回 {"articles_changed": n, "video_ids": [...]}。"""
+    con = _con()
+    rows = con.execute(
+        "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+    con.close()
+    changed = []
+    for r in rows:
+        if _split_article_companies(r["video_id"], entity_set):
             changed.append(r["video_id"])
     return {"articles_changed": len(changed), "video_ids": changed}
 

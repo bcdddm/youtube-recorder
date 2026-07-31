@@ -133,6 +133,70 @@ def test_compose_article_injects_existing_tags():
     assert "已有标签库" not in captured["user"]
 
 
+def test_existing_company_vocab():
+    """公司/实体词表和标签词表分开维护，不经 tags-merge.json 归并，
+    按出现频次降序（同频次按字典序）；con=None 安全返回空表。"""
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir, ensure_dirs
+    ensure_dirs()
+    con = dbm.connect()
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCvocab02','','v2',1,?)", (dbm.now(),))
+    seed = {"cvoc1": ["英伟达", "台积电"], "cvoc2": ["英伟达"], "cvoc3": ["特斯拉"]}
+    for vid, companies in seed.items():
+        dbm.upsert_discovered(con, vid, "UCvocab02", vid, dbm.now())
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
+                    "VALUES(?,'wiki','/tmp/x.md','h',?)", (vid, dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "article.json").write_text(
+            json.dumps({"tags": [], "companies": companies}, ensure_ascii=False))
+    con.commit()
+
+    vocab = art_mod.existing_company_vocab(con)
+    assert vocab[0] == "英伟达"  # 出现 2 次，排第一
+    assert "台积电" in vocab and "特斯拉" in vocab
+    con.close()
+
+    assert art_mod.existing_company_vocab(None) == []  # con=None 安全返回空表
+
+
+def test_compose_article_injects_existing_companies():
+    """有已有公司库时，注入到 user message 里，提示 AI 优先复用同一写法。"""
+    captured = {}
+
+    def fake_complete(cfg, con, vid, system, user, max_tokens=0, purpose=""):
+        captured["user"] = user
+        return FAKE_ARTICLE
+
+    with mock.patch.object(art_mod.providers, "complete", side_effect=fake_complete):
+        art_mod.compose_article(_FakeCfg(None), None, "nnze4i2Mt6o", "标题", "频道",
+                                [{"summary": "s"}], existing_companies=["英伟达", "台积电"])
+    assert "已有公司库" in captured["user"]
+    assert "英伟达" in captured["user"] and "台积电" in captured["user"]
+
+    # 没有已有公司库时不注入这段
+    captured.clear()
+    with mock.patch.object(art_mod.providers, "complete", side_effect=fake_complete):
+        art_mod.compose_article(_FakeCfg(None), None, "nnze4i2Mt6o", "标题", "频道",
+                                [{"summary": "s"}])
+    assert "已有公司库" not in captured["user"]
+
+
+def test_generate_populates_companies_field():
+    """generate() 会把已有标签库、已有公司库都注入 prompt；FAKE_ARTICLE 没有
+    companies 字段时，art['companies'] 应安全兜底为空列表而不是缺失/报错。"""
+    can = _canonical()
+
+    def fake_complete(cfg, con, vid, system, user, max_tokens=0, purpose=""):
+        return FAKE_ARTICLE if "编辑" in system else FAKE_NOTE
+
+    with mock.patch.object(providers, "complete", side_effect=fake_complete), \
+         mock.patch.object(art_mod.providers, "complete", side_effect=fake_complete):
+        art = art_mod.generate(_FakeCfg(None), None, "nnze4i2Mt6o", can,
+                               "原始标题", "美投侃新闻")
+    assert art.get("companies") == []
+
+
 def test_vault_mode_a():
     can = _canonical()
     root = Path(_TMP) / "vault"

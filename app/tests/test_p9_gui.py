@@ -543,3 +543,92 @@ def test_rename_article_tags_everywhere():
     # 幂等：再跑一次不应该再有变化
     result2 = gui.rename_tags_everywhere({"財報": "财报"})
     assert result2["articles_changed"] == 0
+
+
+def test_split_companies_everywhere():
+    """把公司/实体类标签从 tags 里拆出来，单独放进 companies 字段：
+    真正重写 article.json 和 Obsidian 笔记 frontmatter（tags 行 + 新增/更新
+    companies 行），tags 只保留剩下的概念标签，companies 去重保序。"""
+    import json, os
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+
+    root = os.path.join(os.environ["YTREC_HOME"], "vault-split-co")
+    os.makedirs(root, exist_ok=True)
+    c = cfg_mod.load(); c.data["vault"]["root"] = root; cfg_mod.save(c)
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCsc','','s',1,?)", (dbm.now(),))
+    # sc1: 含实体标签「英伟达」，需要拆出；sc2: 已有 companies，追加去重；
+    # sc3: 完全没有实体标签，不应该发生任何变化
+    seed = {
+        "sc1": (["财报解读", "英伟达"], None),
+        "sc2": (["半导体", "台积电"], ["台积电"]),
+        "sc3": (["宏观数据"], None),
+    }
+    for vid, (tags, companies) in seed.items():
+        dbm.upsert_discovered(con, vid, "UCsc", vid, dbm.now())
+        note = os.path.join(root, vid + ".md")
+        open(note, "w", encoding="utf-8").write('---\ntags: ["x"]\n---\n# t\n')
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
+                    "VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        art = {"tags": tags}
+        if companies is not None:
+            art["companies"] = companies
+        (wd / "article.json").write_text(json.dumps(art, ensure_ascii=False))
+    con.commit(); con.close()
+
+    entities = {"英伟达", "台积电"}
+    result = gui.split_companies_everywhere(entities)
+    assert sorted(result["video_ids"]) == ["sc1", "sc2"]  # sc3 未变化
+    assert result["articles_changed"] == 2
+
+    art1 = json.loads((work_dir("sc1") / "article.json").read_text())
+    assert art1["tags"] == ["财报解读"]
+    assert art1["companies"] == ["英伟达"]
+
+    art2 = json.loads((work_dir("sc2") / "article.json").read_text())
+    assert art2["tags"] == ["半导体"]
+    assert art2["companies"] == ["台积电"]  # 已存在，去重不重复
+
+    art3 = json.loads((work_dir("sc3") / "article.json").read_text())
+    assert art3["tags"] == ["宏观数据"]
+    assert "companies" not in art3  # 完全没触碰
+
+    note1 = open(os.path.join(root, "sc1.md"), encoding="utf-8").read()
+    assert 'tags: ["财报解读"]' in note1
+    assert 'companies: ["英伟达"]' in note1  # 老笔记没有 companies 行，新插入
+
+    # 幂等：再跑一次不应该再有变化
+    result2 = gui.split_companies_everywhere(entities)
+    assert result2["articles_changed"] == 0
+
+
+def test_reports_json_includes_companies():
+    """/reports.json 每篇文章应返回 companies 字段（独立于 tags 的公司/
+    实体标签系列），供前端渲染公司云/过滤。"""
+    import json
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCrj','','r',1,?)", (dbm.now(),))
+    dbm.upsert_discovered(con, "rj1", "UCrj", "rj1", dbm.now())
+    con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
+                "VALUES('rj1','wiki','/tmp/rj1.md','h',?)", (dbm.now(),))
+    con.commit(); con.close()
+    wd = work_dir("rj1"); wd.mkdir(parents=True, exist_ok=True)
+    (wd / "article.json").write_text(json.dumps(
+        {"tags": ["财报解读"], "companies": ["英伟达", "台积电"]}, ensure_ascii=False))
+
+    cli = gui.app.test_client()
+    data = cli.get("/reports.json").get_json()
+    row = next(r for r in data if r["video_id"] == "rj1")
+    assert row["companies"] == ["英伟达", "台积电"]
+    assert row["tags"] == ["财报解读"]

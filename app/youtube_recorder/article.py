@@ -36,13 +36,20 @@ COMPOSE_SYSTEM = """你是一名专业编辑，把口述视频的分块笔记整
   每节正文不超过 600 字（保证 2 分钟内能读完一节）。
 - 每个章节必须在 source_chunk_ids 中列出其内容来源的笔记块编号。
 - 标题15字内，准确概括核心内容，不做标题党。
-- 打标签时：若给了"已有标签库"，优先从中选择贴切的标签复用，不要为同一
-  概念反复新造近义词（如已有"AI"就不要再造"AI投资"）；确实没有合适的
-  现有标签才新造，且每篇文章最多新造 1 个新标签；tags 数组仍最多 6 个。
+- 标签分两类，分别输出到 tags 和 companies 两个数组，不要混在一起：
+  · tags：概念/主题标签（如"美联储""财报解读""半导体""技术分析"），
+    若给了"已有标签库"，优先从中选择贴切的复用，不要为同一概念反复新造
+    近义词；确实没有合适的现有标签才新造，且每篇文章最多新造 1 个新
+    标签；最多 6 个。
+  · companies：文章提到的具体公司/股票代码/具名人物/具名产品（如
+    "英伟达""TSLA""鲍威尔""ChatGPT"），不算概念标签，不要塞进 tags；
+    若给了"已有公司库"同样优先复用同一写法（如已有"英伟达"就不要再写
+    "NVIDIA"）；最多 6 个，没有就输出空数组。
 输出 JSON：
 {"title_zh": "...", "aliases": ["别名1","别名2"], "one_sentence": "一句话：谁、讲什么、为什么值得看",
  "summary": "3-5句摘要", "sections": [{"heading": "...", "body": "正文段落，可含多段",
- "source_chunk_ids": [0,1]}...], "takeaways": ["..."...], "tags": ["...", 最多6个]}
+ "source_chunk_ids": [0,1]}...], "takeaways": ["..."...], "tags": ["...", 最多6个],
+ "companies": ["...", 最多6个]}
 只输出 JSON。"""
 
 
@@ -122,10 +129,11 @@ REQUIRED_KEYS = ("title_zh", "one_sentence", "summary", "sections", "takeaways",
 MAX_TAG_VOCAB = 150  # 注入 prompt 的已有标签数上限，按使用频次取前 N 个，控制 token 开销
 
 
-def existing_tag_vocab(con) -> list[str]:
-    """已有文章用过的标签词表（按使用频次降序），成文打标签时优先复用，
-    避免同一概念反复造近义词。读取失败/无历史文章时返回空表，不影响正常
-    生成（此时相当于没有约束，和原来行为一致）。"""
+def _vocab_from_field(con, field: str, max_n: int) -> list[str]:
+    """通用实现：汇总所有历史文章 article.json 里某个数组字段（tags 或
+    companies）出现过的值，按使用频次降序取前 N 个。tags 字段额外经
+    tags-merge.json 的归并映射合并同义词；companies 字段没有归并表，
+    原样按去重后的写法计数（保证以后新文章优先复用同一写法）。"""
     if not con:
         return []
     try:
@@ -133,33 +141,49 @@ def existing_tag_vocab(con) -> list[str]:
         rows = con.execute(
             "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
         tmap = {}
-        try:
-            data = json.loads((APP_SUPPORT / "tags-merge.json").read_text(encoding="utf-8"))
-            tmap = data.get("map", {}) if isinstance(data, dict) else {}
-        except Exception:
-            pass
+        if field == "tags":
+            try:
+                data = json.loads((APP_SUPPORT / "tags-merge.json").read_text(encoding="utf-8"))
+                tmap = data.get("map", {}) if isinstance(data, dict) else {}
+            except Exception:
+                pass
         counts: dict[str, int] = {}
         for r in rows:
             aj = work_dir(r["video_id"]) / "article.json"
             if not aj.exists():
                 continue
             try:
-                ts = json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6]
+                vs = json.loads(aj.read_text(encoding="utf-8")).get(field, [])[:6]
             except Exception:
                 continue
-            for t in ts:
-                if isinstance(t, str) and t.strip():
-                    canon = tmap.get(t, t)
+            for v in vs:
+                if isinstance(v, str) and v.strip():
+                    canon = tmap.get(v, v)
                     counts[canon] = counts.get(canon, 0) + 1
         ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        return [t for t, _ in ranked[:MAX_TAG_VOCAB]]
+        return [t for t, _ in ranked[:max_n]]
     except Exception:
         return []
 
 
+def existing_tag_vocab(con) -> list[str]:
+    """已有文章用过的概念标签词表（按使用频次降序），成文打标签时优先
+    复用，避免同一概念反复造近义词。读取失败/无历史文章时返回空表，
+    不影响正常生成（此时相当于没有约束，和原来行为一致）。"""
+    return _vocab_from_field(con, "tags", MAX_TAG_VOCAB)
+
+
+def existing_company_vocab(con) -> list[str]:
+    """已有文章提到过的公司/股票代码/具名人物词表，成文时优先复用同一
+    写法（如已有"英伟达"就不要再新造"NVIDIA"）。和概念标签分开维护，
+    不占用 100 个概念标签的名额。"""
+    return _vocab_from_field(con, "companies", MAX_TAG_VOCAB)
+
+
 def compose_article(cfg, con, video_id: str, video_title: str,
                     channel: str, notes: list[dict],
-                    group_prompt: str = "", existing_tags: list[str] | None = None) -> dict:
+                    group_prompt: str = "", existing_tags: list[str] | None = None,
+                    existing_companies: list[str] | None = None) -> dict:
     system = COMPOSE_SYSTEM
     custom = (cfg.get("article.custom_prompt") or "").strip()
     if custom:
@@ -172,6 +196,8 @@ def compose_article(cfg, con, video_id: str, video_title: str,
             + json.dumps(notes, ensure_ascii=False))
     if existing_tags:
         user += "\n\n已有标签库（打标签时优先复用，不要新造近义词）：\n" + "、".join(existing_tags)
+    if existing_companies:
+        user += "\n\n已有公司库（提到同一公司/实体时优先复用同一写法）：\n" + "、".join(existing_companies)
     reply = providers.complete(cfg, con, video_id, system, user,
                                max_tokens=8000, purpose="compose")
     try:
@@ -186,6 +212,8 @@ def compose_article(cfg, con, video_id: str, video_title: str,
         raise ValueError(f"article JSON missing keys: {missing}")
     if not isinstance(art["sections"], list) or not art["sections"]:
         raise ValueError("article has no sections")
+    if not isinstance(art.get("companies"), list):
+        art["companies"] = []
     return art
 
 
@@ -205,11 +233,16 @@ SELECT_SYSTEM = """你是选句编辑。给你一段视频口述稿的带编号�
 只输出 JSON。"""
 
 META_SYSTEM = """根据文章的章节标题与摘句样本，生成元信息。不得编造材料外的事实。
-打标签时：若给了"已有标签库"，优先从中选择贴切的标签复用，不要为同一概念
-反复新造近义词；确实没有合适的现有标签才新造，且每篇文章最多新造 1 个新
-标签；tags 数组仍最多 6 个。
+标签分两类，分别输出到 tags 和 companies 两个数组，不要混在一起：
+· tags：概念/主题标签，若给了"已有标签库"，优先从中选择贴切的复用，不要
+  为同一概念反复新造近义词；确实没有合适的现有标签才新造，且每篇文章
+  最多新造 1 个新标签；最多 6 个。
+· companies：文章提到的具体公司/股票代码/具名人物/具名产品，不算概念
+  标签，不要塞进 tags；若给了"已有公司库"同样优先复用同一写法；最多 6
+  个，没有就输出空数组。
 输出 JSON：{"title_zh":"15字内标题","aliases":["别名"],"one_sentence":"一句话",
-"summary":"3-5句摘要","takeaways":["要点"...],"tags":["标签",最多6个]}
+"summary":"3-5句摘要","takeaways":["要点"...],"tags":["标签",最多6个],
+"companies":["...",最多6个]}
 只输出 JSON。"""
 
 
@@ -466,6 +499,7 @@ def generate(cfg, con, video_id: str, can: Canonical,
     chunks = chunk_transcript(can)
     pct = int(cfg.get("article.verbatim_pct", 70) or 0)
     vocab = existing_tag_vocab(con)
+    company_vocab = existing_company_vocab(con)
     if pct >= 40:
         sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct,
                                              group_prompt=group_prompt)
@@ -474,6 +508,8 @@ def generate(cfg, con, video_id: str, can: Canonical,
         user_msg = f"视频标题：{video_title}\n频道：{channel}\n\n" + sample
         if vocab:
             user_msg += "\n\n已有标签库（打标签时优先复用，不要新造近义词）：\n" + "、".join(vocab)
+        if company_vocab:
+            user_msg += "\n\n已有公司库（提到同一公司/实体时优先复用同一写法）：\n" + "、".join(company_vocab)
         try:
             reply = providers.complete(cfg, con, video_id, META_SYSTEM,
                                        user_msg, max_tokens=1500, purpose="compose")
@@ -488,13 +524,15 @@ def generate(cfg, con, video_id: str, can: Canonical,
             "sections": sections,
             "takeaways": meta.get("takeaways", []),
             "tags": meta.get("tags", []),
+            "companies": meta.get("companies", []) if isinstance(meta.get("companies"), list) else [],
             "verbatim_pct": pct,
             "verbatim_ratio": ratio,
         }
     else:
         notes = analyze_chunks(cfg, con, video_id, chunks)
         art = compose_article(cfg, con, video_id, video_title, channel, notes,
-                              group_prompt=group_prompt, existing_tags=vocab)
+                              group_prompt=group_prompt, existing_tags=vocab,
+                              existing_companies=company_vocab)
     if pct >= 40 and cfg.get("article.punctuation", "ai") == "ai":
         art["punctuated"] = _punctuate_sections(cfg, con, video_id,
                                                 art.get("sections", []))

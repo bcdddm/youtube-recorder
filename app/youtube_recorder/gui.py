@@ -2658,22 +2658,12 @@ window.addEventListener('load', () => setTimeout(updateHint, 2500));
     return page("阅读", "reports", body)
 
 
-def _remove_article_tag(video_id: str, tag: str) -> bool:
-    """从某篇文章的 article.json 移除标签，并同步 Obsidian 笔记 frontmatter。
-    返回是否实际删除（幂等：本就没有则 False）。"""
+def _write_article_tags(video_id: str, art: dict, tags: list) -> None:
+    """把新的标签列表写回 article.json 并原子替换，同步 Obsidian 笔记
+    frontmatter 的 tags 行（找不到笔记或不在库内则安静跳过）。"""
     from .paths import work_dir
     import json as _j
     aj = work_dir(video_id) / "article.json"
-    if not aj.exists():
-        return False
-    try:
-        art = _j.loads(aj.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    orig = art.get("tags") or []
-    tags = [t for t in orig if t != tag]
-    if len(tags) == len(orig):
-        return False
     art["tags"] = tags
     tmp = aj.with_suffix(".json.tmp")
     tmp.write_text(_j.dumps(art, ensure_ascii=False), encoding="utf-8")
@@ -2700,7 +2690,66 @@ def _remove_article_tag(video_id: str, tag: str) -> bool:
                     ntmp.replace(np)
     except Exception:
         pass
+
+
+def _remove_article_tag(video_id: str, tag: str) -> bool:
+    """从某篇文章的 article.json 移除标签，并同步 Obsidian 笔记 frontmatter。
+    返回是否实际删除（幂等：本就没有则 False）。"""
+    from .paths import work_dir
+    import json as _j
+    aj = work_dir(video_id) / "article.json"
+    if not aj.exists():
+        return False
+    try:
+        art = _j.loads(aj.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    orig = art.get("tags") or []
+    tags = [t for t in orig if t != tag]
+    if len(tags) == len(orig):
+        return False
+    _write_article_tags(video_id, art, tags)
     return True
+
+
+def _rename_article_tags(video_id: str, mapping: dict) -> bool:
+    """按 mapping（旧标签 -> 规范标签）真正重写某篇文章的标签列表（去重保序），
+    并同步 Obsidian 笔记 frontmatter——和 tags-merge.json 的显示层映射不同，
+    这是直接改写源数据，用于"这些标签明显就是同一个，强制合并覆盖"的场景。
+    返回是否有实际变化（幂等：没有命中 mapping 则 False）。"""
+    from .paths import work_dir
+    import json as _j
+    aj = work_dir(video_id) / "article.json"
+    if not aj.exists():
+        return False
+    try:
+        art = _j.loads(aj.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    orig = art.get("tags") or []
+    new_tags = []
+    for t in orig:
+        c = mapping.get(t, t) if isinstance(t, str) else t
+        if c not in new_tags:
+            new_tags.append(c)
+    if new_tags == orig:
+        return False
+    _write_article_tags(video_id, art, new_tags)
+    return True
+
+
+def rename_tags_everywhere(mapping: dict) -> dict:
+    """对全部已写入 wiki 笔记的文章应用 mapping 重写标签（见
+    _rename_article_tags）。返回 {"articles_changed": n, "video_ids": [...]}。"""
+    con = _con()
+    rows = con.execute(
+        "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+    con.close()
+    changed = []
+    for r in rows:
+        if _rename_article_tags(r["video_id"], mapping):
+            changed.append(r["video_id"])
+    return {"articles_changed": len(changed), "video_ids": changed}
 
 
 @app.post("/reports/<video_id>/tag-remove")

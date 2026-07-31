@@ -36,6 +36,9 @@ COMPOSE_SYSTEM = """你是一名专业编辑，把口述视频的分块笔记整
   每节正文不超过 600 字（保证 2 分钟内能读完一节）。
 - 每个章节必须在 source_chunk_ids 中列出其内容来源的笔记块编号。
 - 标题15字内，准确概括核心内容，不做标题党。
+- 打标签时：若给了"已有标签库"，优先从中选择贴切的标签复用，不要为同一
+  概念反复新造近义词（如已有"AI"就不要再造"AI投资"）；确实没有合适的
+  现有标签才新造，且每篇文章最多新造 1 个新标签；tags 数组仍最多 6 个。
 输出 JSON：
 {"title_zh": "...", "aliases": ["别名1","别名2"], "one_sentence": "一句话：谁、讲什么、为什么值得看",
  "summary": "3-5句摘要", "sections": [{"heading": "...", "body": "正文段落，可含多段",
@@ -116,10 +119,47 @@ def analyze_chunks(cfg, con, video_id: str, chunks: list[Chunk]) -> list[dict]:
 
 REQUIRED_KEYS = ("title_zh", "one_sentence", "summary", "sections", "takeaways", "tags")
 
+MAX_TAG_VOCAB = 150  # 注入 prompt 的已有标签数上限，按使用频次取前 N 个，控制 token 开销
+
+
+def existing_tag_vocab(con) -> list[str]:
+    """已有文章用过的标签词表（按使用频次降序），成文打标签时优先复用，
+    避免同一概念反复造近义词。读取失败/无历史文章时返回空表，不影响正常
+    生成（此时相当于没有约束，和原来行为一致）。"""
+    if not con:
+        return []
+    try:
+        from .paths import APP_SUPPORT, work_dir
+        rows = con.execute(
+            "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+        tmap = {}
+        try:
+            data = json.loads((APP_SUPPORT / "tags-merge.json").read_text(encoding="utf-8"))
+            tmap = data.get("map", {}) if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        counts: dict[str, int] = {}
+        for r in rows:
+            aj = work_dir(r["video_id"]) / "article.json"
+            if not aj.exists():
+                continue
+            try:
+                ts = json.loads(aj.read_text(encoding="utf-8")).get("tags", [])[:6]
+            except Exception:
+                continue
+            for t in ts:
+                if isinstance(t, str) and t.strip():
+                    canon = tmap.get(t, t)
+                    counts[canon] = counts.get(canon, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [t for t, _ in ranked[:MAX_TAG_VOCAB]]
+    except Exception:
+        return []
+
 
 def compose_article(cfg, con, video_id: str, video_title: str,
                     channel: str, notes: list[dict],
-                    group_prompt: str = "") -> dict:
+                    group_prompt: str = "", existing_tags: list[str] | None = None) -> dict:
     system = COMPOSE_SYSTEM
     custom = (cfg.get("article.custom_prompt") or "").strip()
     if custom:
@@ -130,6 +170,8 @@ def compose_article(cfg, con, video_id: str, video_title: str,
                    + group_prompt)
     user = (f"视频标题：{video_title}\n频道：{channel}\n\n分块笔记：\n"
             + json.dumps(notes, ensure_ascii=False))
+    if existing_tags:
+        user += "\n\n已有标签库（打标签时优先复用，不要新造近义词）：\n" + "、".join(existing_tags)
     reply = providers.complete(cfg, con, video_id, system, user,
                                max_tokens=8000, purpose="compose")
     try:
@@ -163,6 +205,9 @@ SELECT_SYSTEM = """你是选句编辑。给你一段视频口述稿的带编号�
 只输出 JSON。"""
 
 META_SYSTEM = """根据文章的章节标题与摘句样本，生成元信息。不得编造材料外的事实。
+打标签时：若给了"已有标签库"，优先从中选择贴切的标签复用，不要为同一概念
+反复新造近义词；确实没有合适的现有标签才新造，且每篇文章最多新造 1 个新
+标签；tags 数组仍最多 6 个。
 输出 JSON：{"title_zh":"15字内标题","aliases":["别名"],"one_sentence":"一句话",
 "summary":"3-5句摘要","takeaways":["要点"...],"tags":["标签",最多6个]}
 只输出 JSON。"""
@@ -420,15 +465,18 @@ def generate(cfg, con, video_id: str, can: Canonical,
              group_prompt: str = "") -> dict:
     chunks = chunk_transcript(can)
     pct = int(cfg.get("article.verbatim_pct", 70) or 0)
+    vocab = existing_tag_vocab(con)
     if pct >= 40:
         sections, ratio = _verbatim_sections(cfg, con, video_id, can, chunks, pct,
                                              group_prompt=group_prompt)
         sample = "\n".join(
             f"## {s['heading']}\n{s['body'][:200]}" for s in sections)[:8000]
+        user_msg = f"视频标题：{video_title}\n频道：{channel}\n\n" + sample
+        if vocab:
+            user_msg += "\n\n已有标签库（打标签时优先复用，不要新造近义词）：\n" + "、".join(vocab)
         try:
             reply = providers.complete(cfg, con, video_id, META_SYSTEM,
-                                       f"视频标题：{video_title}\n频道：{channel}\n\n"
-                                       + sample, max_tokens=1500, purpose="compose")
+                                       user_msg, max_tokens=1500, purpose="compose")
             meta = providers.extract_json(reply)
         except Exception:
             meta = {}
@@ -446,7 +494,7 @@ def generate(cfg, con, video_id: str, can: Canonical,
     else:
         notes = analyze_chunks(cfg, con, video_id, chunks)
         art = compose_article(cfg, con, video_id, video_title, channel, notes,
-                              group_prompt=group_prompt)
+                              group_prompt=group_prompt, existing_tags=vocab)
     if pct >= 40 and cfg.get("article.punctuation", "ai") == "ai":
         art["punctuated"] = _punctuate_sections(cfg, con, video_id,
                                                 art.get("sections", []))

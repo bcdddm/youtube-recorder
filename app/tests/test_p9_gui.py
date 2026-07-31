@@ -500,3 +500,46 @@ def test_queue_unskip_ignored_video():
     v = dbm.get_video(con, "unskip1")
     con.close()
     assert v["status"] == st.DISCOVERED
+
+
+def test_rename_article_tags_everywhere():
+    """强制合并明显相同的标签（比如简繁写法）：真正重写 article.json 和
+    Obsidian 笔记 frontmatter，而不只是显示层映射；同一篇文章里两个变体
+    都出现时要去重。"""
+    import json, os
+    import youtube_recorder.gui as gui
+    from youtube_recorder import db as dbm
+    from youtube_recorder.paths import work_dir
+
+    root = os.path.join(os.environ["YTREC_HOME"], "vault-rename")
+    os.makedirs(root, exist_ok=True)
+    c = cfg_mod.load(); c.data["vault"]["root"] = root; cfg_mod.save(c)
+    con = gui._con()
+    con.execute("DELETE FROM writes")
+    con.execute("INSERT OR IGNORE INTO channels(channel_id,url,name,enabled,added_at) "
+                "VALUES('UCrn','','r',1,?)", (dbm.now(),))
+    seed = {"rn1": ["財報", "美股"], "rn2": ["财报", "財報"]}
+    for vid, tags in seed.items():
+        dbm.upsert_discovered(con, vid, "UCrn", vid, dbm.now())
+        note = os.path.join(root, vid + ".md")
+        open(note, "w", encoding="utf-8").write('---\ntags: ["x"]\n---\n# t\n')
+        con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
+                    "VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
+        wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+    con.commit(); con.close()
+
+    result = gui.rename_tags_everywhere({"財報": "财报"})
+    assert result["articles_changed"] == 2
+    assert sorted(result["video_ids"]) == ["rn1", "rn2"]
+    assert json.loads((work_dir("rn1") / "article.json").read_text())["tags"] == ["财报", "美股"]
+    assert json.loads((work_dir("rn2") / "article.json").read_text())["tags"] == ["财报"]  # 去重
+
+    note1 = open(os.path.join(root, "rn1.md"), encoding="utf-8").read()
+    assert 'tags: ["财报", "美股"]' in note1
+    note2 = open(os.path.join(root, "rn2.md"), encoding="utf-8").read()
+    assert 'tags: ["财报"]' in note2
+
+    # 幂等：再跑一次不应该再有变化
+    result2 = gui.rename_tags_everywhere({"財報": "财报"})
+    assert result2["articles_changed"] == 0

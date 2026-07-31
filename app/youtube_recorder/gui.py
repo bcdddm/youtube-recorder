@@ -157,6 +157,10 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .tagchip.arm{background:#e5484d;color:#fff;border-color:#e5484d}
  .tagchip.co{font-size:11px;padding:1px 9px;opacity:.8}
  .tagchip.co.on{background:#6b7a8f;border-color:#6b7a8f;color:#fff;opacity:1}
+ .tagsubtab{background:transparent;border:1px solid transparent;border-radius:8px;
+   padding:3px 12px;font-size:12.5px;color:var(--dim);cursor:pointer}
+ .tagsubtab:hover{color:var(--fg)}
+ .tagsubtab.on{background:var(--card2);border-color:var(--bord);color:var(--fg);font-weight:600}
  .grpbar{position:sticky;top:52px;z-index:8}
  .busy{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99;
    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
@@ -2270,22 +2274,18 @@ _REPORTS_TMPL = """
 <option value=flat>平铺列表</option></select>
 <span id=count class=dim></span></div>
 <div class=card id=tagbar style="display:none;padding:10px 14px 8px;overflow:visible">
+<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+<button id=tagtab-content class="tagsubtab on" onclick="setTagTab('content')">内容标签 <span id=tagtab-content-count class=dim></span></button>
+<button id=tagtab-co class=tagsubtab onclick="setTagTab('companies')">🏢 公司/实体 <span id=tagtab-co-count class=dim></span></button>
+</div>
 <div class=tagwrap><div class=taginner>
-<span class=dim style="margin-right:6px">标签：</span><span id=tags></span>
+<span id=tags></span>
 </div></div>
-<div style="text-align:right;margin-top:2px">
+<div id=tagbar-tools style="text-align:right;margin-top:2px">
 <label class=dim style="font-size:11px;margin-right:10px;user-select:none;cursor:pointer">
 <input type=checkbox id=dropOrphan> 移除孤儿标签（仅 1 篇文章用到）</label>
 <button id=mtbtn
  style="font-size:11px;padding:1px 8px" onclick="mergeTags()">🏷 AI 归并同义标签</button></div></div>
-<div class=card id=cobar style="display:none;padding:8px 14px">
-<div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleCoOpen()">
-<span class=dim>🏢 公司/实体 <span id=cocount></span></span>
-<button id=cotogglebtn style="font-size:11px;padding:1px 8px;margin-left:auto">展开</button>
-</div>
-<div class=tagwrap id=cowrap style="display:none;margin-top:6px"><div class=taginner>
-<span id=companies></span>
-</div></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
 <table><thead><tr><th>标题</th><th>删除于</th><th>剩余</th><th></th></tr></thead>
@@ -2401,15 +2401,26 @@ function layoutChips(wrap) {
     inner.style.overflowY = 'hidden'; inner.scrollTop = 0; };
 }
 function layoutTags() { layoutChips(document.querySelector('#tagbar .tagwrap')); }
-let COBAR_OPEN = false;
-function toggleCoOpen() {
-  COBAR_OPEN = !COBAR_OPEN;
-  const cw = document.getElementById('cowrap');
-  cw.style.display = COBAR_OPEN ? '' : 'none';
-  document.getElementById('cotogglebtn').textContent = COBAR_OPEN ? '收起' : '展开';
-  if (COBAR_OPEN) requestAnimationFrame(() => layoutChips(cw));
+let TAGTAB = 'content';
+let ALL_TAGS = new Set(), ALL_CO = new Set();
+function setTagTab(tab) {
+  TAGTAB = tab;
+  document.getElementById('tagtab-content').classList.toggle('on', tab === 'content');
+  document.getElementById('tagtab-co').classList.toggle('on', tab === 'companies');
+  document.getElementById('tagbar-tools').style.display = tab === 'content' ? '' : 'none';
+  renderTagCloud();
 }
-window.addEventListener('resize', () => { layoutTags(); if (COBAR_OPEN) layoutChips(document.getElementById('cowrap')); });
+function renderTagCloud() {
+  if (TAGTAB === 'content') {
+    document.getElementById('tags').innerHTML = [...ALL_TAGS].sort().map(t=>
+      `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
+  } else {
+    document.getElementById('tags').innerHTML = [...ALL_CO].sort().map(c=>
+      `<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}')">${esc(c)}</span>`).join('');
+  }
+  layoutTags();
+}
+window.addEventListener('resize', layoutTags);
 function render() {
   const rows = filtered();
   const scope = [...GRPS].join('+');
@@ -2417,22 +2428,16 @@ function render() {
     `${rows.length} 篇` + (scope ? ` · 组:${scope}` : '') +
     (TAGS.size ? ` · #${[...TAGS].join(' #')}` : '') +
     (COMPANIES.size ? ` · 🏢${[...COMPANIES].join(' 🏢')}` : '');
-  // 标签栏
-  const all = new Set(); DATA.forEach(r=>(r.tags||[]).forEach(t=>all.add(t)));
+  // 内容标签 + 公司/实体：同一个卡片里用选项卡切换，不再各占一格
+  ALL_TAGS = new Set(); DATA.forEach(r=>(r.tags||[]).forEach(t=>ALL_TAGS.add(t)));
+  ALL_CO = new Set(); DATA.forEach(r=>(r.companies||[]).forEach(c=>ALL_CO.add(c)));
   const tb = document.getElementById('tagbar');
-  tb.style.display = all.size ? '' : 'none';
-  document.getElementById('tags').innerHTML = [...all].sort().map(t=>
-    `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
-  layoutTags();
-  // 公司/实体栏（独立于概念标签，不参与 AI 归并；默认收起，避免 60+ 个公司占满屏幕）
-  const allCo = new Set(); DATA.forEach(r=>(r.companies||[]).forEach(c=>allCo.add(c)));
-  const cb = document.getElementById('cobar');
-  cb.style.display = allCo.size ? '' : 'none';
-  document.getElementById('cocount').textContent =
-    `(${allCo.size}${COMPANIES.size ? ` · 已选 ${COMPANIES.size}` : ''})`;
-  document.getElementById('companies').innerHTML = [...allCo].sort().map(c=>
-    `<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}');event.stopPropagation()">${esc(c)}</span>`).join('');
-  if (COBAR_OPEN) layoutChips(document.getElementById('cowrap'));
+  tb.style.display = (ALL_TAGS.size || ALL_CO.size) ? '' : 'none';
+  document.getElementById('tagtab-content-count').textContent =
+    `(${ALL_TAGS.size}${TAGS.size ? ` · 已选 ${TAGS.size}` : ''})`;
+  document.getElementById('tagtab-co-count').textContent =
+    `(${ALL_CO.size}${COMPANIES.size ? ` · 已选 ${COMPANIES.size}` : ''})`;
+  renderTagCloud();
   // 组胶囊（置顶排，多选）
   const gAll = [...new Set(DATA.flatMap(r=>r.grps||[]))].sort();
   const gc = document.getElementById('grpcard');

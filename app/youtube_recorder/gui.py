@@ -155,8 +155,8 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  .tagchip:hover{border-color:var(--acc);color:var(--acc)}
  .tagchip.on{background:var(--acc);color:var(--acctext);border-color:var(--acc)}
  .tagchip.arm{background:#e5484d;color:#fff;border-color:#e5484d}
- .tagchip.co{border-style:dashed}
- .tagchip.co.on{background:#6b7a8f;border-color:#6b7a8f;color:#fff}
+ .tagchip.co{font-size:11px;padding:1px 9px;opacity:.8}
+ .tagchip.co.on{background:#6b7a8f;border-color:#6b7a8f;color:#fff;opacity:1}
  .grpbar{position:sticky;top:52px;z-index:8}
  .busy{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99;
    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
@@ -2278,9 +2278,13 @@ _REPORTS_TMPL = """
 <input type=checkbox id=dropOrphan> 移除孤儿标签（仅 1 篇文章用到）</label>
 <button id=mtbtn
  style="font-size:11px;padding:1px 8px" onclick="mergeTags()">🏷 AI 归并同义标签</button></div></div>
-<div class=card id=cobar style="display:none;padding:10px 14px 8px;overflow:visible">
-<div class=tagwrap><div class=taginner>
-<span class=dim style="margin-right:6px">公司/实体：</span><span id=companies></span>
+<div class=card id=cobar style="display:none;padding:8px 14px">
+<div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleCoOpen()">
+<span class=dim>🏢 公司/实体 <span id=cocount></span></span>
+<button id=cotogglebtn style="font-size:11px;padding:1px 8px;margin-left:auto">展开</button>
+</div>
+<div class=tagwrap id=cowrap style="display:none;margin-top:6px"><div class=taginner>
+<span id=companies></span>
 </div></div></div>
 <div id=list></div>
 <div class=card id=trashcard style="display:none"><h3>🗑 回收站 <span class=dim>· 保留 3 天后自动清除</span></h3>
@@ -2376,10 +2380,8 @@ function bulkDelete() {
   f.innerHTML = `<input type=hidden name=_csrf value="${CSRF_T}"><input type=hidden name=ids value="${ids.join(',')}">`;
   document.body.appendChild(f); f.submit();
 }
-function layoutTags() {
-  const wrap = document.querySelector('#tagbar .tagwrap'); if (!wrap) return;
-  const tb = document.getElementById('tagbar');
-  if (tb.style.display === 'none') return;
+function layoutChips(wrap) {
+  if (!wrap || wrap.offsetParent === null) return;   // 不可见就不算（避免 0 高度误判）
   const inner = wrap.querySelector('.taginner');
   inner.classList.remove('open');
   inner.style.maxHeight = 'none'; inner.style.overflowY = 'hidden';
@@ -2398,7 +2400,16 @@ function layoutTags() {
     inner.style.maxHeight = coll + 'px';
     inner.style.overflowY = 'hidden'; inner.scrollTop = 0; };
 }
-window.addEventListener('resize', layoutTags);
+function layoutTags() { layoutChips(document.querySelector('#tagbar .tagwrap')); }
+let COBAR_OPEN = false;
+function toggleCoOpen() {
+  COBAR_OPEN = !COBAR_OPEN;
+  const cw = document.getElementById('cowrap');
+  cw.style.display = COBAR_OPEN ? '' : 'none';
+  document.getElementById('cotogglebtn').textContent = COBAR_OPEN ? '收起' : '展开';
+  if (COBAR_OPEN) requestAnimationFrame(() => layoutChips(cw));
+}
+window.addEventListener('resize', () => { layoutTags(); if (COBAR_OPEN) layoutChips(document.getElementById('cowrap')); });
 function render() {
   const rows = filtered();
   const scope = [...GRPS].join('+');
@@ -2413,12 +2424,15 @@ function render() {
   document.getElementById('tags').innerHTML = [...all].sort().map(t=>
     `<span class="tagchip ${TAGS.has(t)?'on':''}" onclick="setTag('${esc(t)}')">${esc(t)}</span>`).join('');
   layoutTags();
-  // 公司/实体栏（独立于概念标签，不参与 AI 归并）
+  // 公司/实体栏（独立于概念标签，不参与 AI 归并；默认收起，避免 60+ 个公司占满屏幕）
   const allCo = new Set(); DATA.forEach(r=>(r.companies||[]).forEach(c=>allCo.add(c)));
   const cb = document.getElementById('cobar');
   cb.style.display = allCo.size ? '' : 'none';
+  document.getElementById('cocount').textContent =
+    `(${allCo.size}${COMPANIES.size ? ` · 已选 ${COMPANIES.size}` : ''})`;
   document.getElementById('companies').innerHTML = [...allCo].sort().map(c=>
-    `<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}')">${esc(c)}</span>`).join('');
+    `<span class="tagchip co ${COMPANIES.has(c)?'on':''}" onclick="setCompany('${esc(c)}');event.stopPropagation()">${esc(c)}</span>`).join('');
+  if (COBAR_OPEN) layoutChips(document.getElementById('cowrap'));
   // 组胶囊（置顶排，多选）
   const gAll = [...new Set(DATA.flatMap(r=>r.grps||[]))].sort();
   const gc = document.getElementById('grpcard');

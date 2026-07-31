@@ -4,7 +4,7 @@ readable-article generation and Obsidian ingestion.
 By Leoluchino.
 """
 
-__version__ = "0.4.22"
+__version__ = "0.4.23"
 
 APP_NAME = "YouTube Recorder"
 AUTHOR = "By Leoluchino"

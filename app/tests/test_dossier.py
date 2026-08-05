@@ -536,6 +536,61 @@ def test_backfill_all_skips_broken_video_without_failing_the_batch():
     assert result["scanned"] >= 1
 
 
+def test_rescan_all_archives_notes_resets_and_rebuilds():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossier7", "https://youtube.com/@d7", "D7")
+    dbm.upsert_discovered(con, "vidRS1", "UCdossier7", "标题", "2026-07-10T00:00:00Z")
+    _write_article_json("vidRS1", ["重扫测试公司"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidRS1", "wiki", "/fake/vault/30-Wiki/标题--vidRS1.md", dbm.now()))
+    con.commit()
+
+    root = Path(_TMP) / "vault-rescan"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    # first pass: old-style content (pretend it predates the channel-prefix
+    # and structured price-level upgrade)
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        n1 = dossier.process_video_companies(_Cfg(), con, "vidRS1")
+    assert n1 == 1
+    old_path = dossier.dossier_note_path(root, "重扫测试公司")
+    assert old_path.exists()
+    assert len(dbm.dossier_price_levels_for(con, "重扫测试公司")) == 1
+
+    # rescan: archives the old note, wipes processed/price-level state,
+    # and rebuilds everything fresh via backfill_all()
+    new_reply = json.dumps({
+        "observations": ["重扫后的新观点"], "concerns": [],
+        "price_levels": [{"text": "重扫后的新点位", "price": 900,
+                          "level_type": "target"}]})
+    with mock.patch.object(providers, "complete", return_value=new_reply):
+        result = dossier.rescan_all(_Cfg(), con)
+    assert result["archived_notes"] >= 1
+    assert result["companies_processed"] >= 1
+
+    # old note content preserved in the archive folder (not deleted)
+    archived_files = list(dossier.archive_dir(root).glob("重扫测试公司*.md"))
+    assert archived_files
+    assert "800 美元一线视为支撑" in archived_files[0].read_text(encoding="utf-8")
+
+    # main note now has the freshly-regenerated content instead
+    new_txt = old_path.read_text(encoding="utf-8")
+    assert "重扫后的新观点" in new_txt
+    assert "800 美元一线视为支撑" not in new_txt   # not duplicated from the old run
+
+    levels = dbm.dossier_price_levels_for(con, "重扫测试公司")
+    assert len(levels) == 1
+    assert levels[0]["price"] == 900.0
+
+
 # --- gui.py: /companies list + detail routes --------------------------------
 
 def test_companies_routes():
@@ -594,6 +649,9 @@ def test_companies_routes():
     assert "数据中心需求强劲".encode() in r.data
     assert "120 美元一线".encode() in r.data
     assert "频道甲".encode() in r.data             # channel name shown
+    # scroll position is preserved across form-submit reloads (delete/pin/etc
+    # shouldn't jump the page back to the top)
+    assert b"ytrec_scroll_" in r.data
 
     assert client.get("/companies/不存在的公司").status_code == 404
 
@@ -640,6 +698,64 @@ def test_companies_pending_queue_approve_and_reject():
     assert not dossier.dossier_note_path(gvault, "待拒绝测试实体").exists()
     assert (dossier.archive_dir(gvault) / "待拒绝测试实体.md").exists()
     assert "待拒绝测试实体".encode() not in client.get("/companies").data
+
+
+def test_companies_pin_and_collapse():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-pin"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    for n in ("置顶测试甲", "置顶测试乙", "折叠测试丙"):
+        dossier.append_dossier_entries(
+            gvault, n, video_id=f"vp_{n}", published="2026-07-01T00:00:00Z",
+            channel="X", source_link="[[n]]",
+            points={"observations": ["内容"], "concerns": [], "price_levels": []})
+
+    con = dbm.connect()
+
+    # pin 甲 then 乙 -> 乙 (pinned later) sits above 甲 in the pinned block
+    r = client.post("/companies/pin", data={"_csrf": gui.CSRF, "name": "置顶测试甲"},
+                    follow_redirects=True)
+    assert r.status_code == 200
+    r = client.post("/companies/pin", data={"_csrf": gui.CSRF, "name": "置顶测试乙"},
+                    follow_redirects=True)
+    body = r.data.decode()
+    assert "📌 置顶" in body
+    pos_a = body.index("置顶测试甲")
+    pos_b = body.index("置顶测试乙")
+    assert pos_b < pos_a          # most-recently-pinned floats to the top
+
+    # collapse 丙 -> disappears from the main table, shows under 已折叠
+    r = client.post("/companies/collapse", data={"_csrf": gui.CSRF, "name": "折叠测试丙"},
+                    follow_redirects=True)
+    body = r.data.decode()
+    assert "已折叠 1 个" in body
+    main_table = body.split("已折叠", 1)[0]
+    assert "折叠测试丙" not in main_table
+
+    # uncollapse brings it back into the regular list
+    r = client.post("/companies/uncollapse", data={"_csrf": gui.CSRF, "name": "折叠测试丙"},
+                    follow_redirects=True)
+    body = r.data.decode()
+    assert "折叠测试丙" in body
+    assert "已折叠" not in body
+
+    # unpin 甲 -> leaves the pinned block, 乙 stays pinned
+    r = client.post("/companies/unpin", data={"_csrf": gui.CSRF, "name": "置顶测试甲"},
+                    follow_redirects=True)
+    body = r.data.decode()
+    pinned_block = body.split("📌 置顶", 1)[1].split("</table>", 1)[0]
+    assert "置顶测试甲" not in pinned_block
+    assert "置顶测试乙" in pinned_block
+
+    ent = dbm.dossier_get_entity(con, "置顶测试甲")
+    assert ent["pinned"] == 0
 
 
 def test_company_view_redirects_alias_to_canonical():
@@ -698,6 +814,12 @@ def test_company_view_renders_price_level_table_and_clickable_source():
     # the [[标题--realvid123]] citation became a real clickable link
     assert b'href="/reports/realvid123"' in r.data
     assert "没能识别出对应的股票代码".encode() in r.data
+    # delete button has no confirm() prompt — deletes immediately
+    assert b"priceLevelTable" in r.data
+    assert b'data-date="2026-07-03"' in r.data
+    del_form_idx = r.data.find(b"price-level/delete")
+    form_snippet = r.data[del_form_idx - 40:del_form_idx + 200]
+    assert b"confirm(" not in form_snippet
 
 
 def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
@@ -728,6 +850,141 @@ def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
     assert b"chart.js" in r.data
     assert "价格走势与推荐点位（FAKE）".encode() in r.data
     assert b"2026-07-01" in r.data and b"95.0" in r.data
+    assert b"pointStyle" in r.data and b"dash" in r.data   # short-dash markers
+    assert b"channel" in r.data and b"X" in r.data          # per-channel grouping
+    assert b"#d16060" in r.data                              # palette color assigned
+    # time-range quick filters (近1月/近3月/近6月/近1年/全部) + JS to filter
+    # both the chart and the price-level table in sync
+    for label in ("近1月", "近3月", "近6月", "近1年", "全部"):
+        assert label.encode() in r.data
+    assert b"data-range-for=" in r.data
+    assert b"applyRange" in r.data
+    assert b"priceLevelTable" in r.data
+
+
+def test_dossier_chart_groups_points_by_channel_with_distinct_colors():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart-multi"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "多频道图表测试公司", video_id="vc2", published="2026-07-01T00:00:00Z",
+        channel="频道甲", source_link="[[n1]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "甲说的点位", "price": 100,
+                                 "level_type": "support"}]},
+        con=con)
+    dossier.append_dossier_entries(
+        gvault, "多频道图表测试公司", video_id="vc3", published="2026-07-02T00:00:00Z",
+        channel="频道乙", source_link="[[n2]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "乙说的点位", "price": 110,
+                                 "level_type": "resistance"}]},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 95.0},
+                {"date": "2026-07-02", "close": 101.0}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="FAKE2"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/多频道图表测试公司")
+    assert r.status_code == 200
+    body = r.data.decode()
+    assert "频道甲" in body and "频道乙" in body
+    # two distinct channels -> two distinct palette colors used
+    assert "#d16060" in body and "#7aa2f7" in body
+    assert "甲说的点位" in body and "乙说的点位" in body
+
+
+def test_filter_price_level_outliers_drops_20x_off_points():
+    rows = [
+        {"price": 120}, {"price": 150}, {"price": 160},   # cluster near ref
+        {"price": 5},                                       # < ref/20 -> dropped
+        {"price": 5000},                                    # > ref*20 -> dropped
+    ]
+    kept, excluded = dossier.filter_price_level_outliers(rows, reference=130)
+    assert [r["price"] for r in kept] == [120, 150, 160]
+    assert [r["price"] for r in excluded] == [5, 5000]
+
+
+def test_filter_price_level_outliers_falls_back_to_median_without_reference():
+    rows = [{"price": 100}, {"price": 110}, {"price": 105}, {"price": 3000}]
+    kept, excluded = dossier.filter_price_level_outliers(rows, reference=None)
+    assert 3000 not in [r["price"] for r in kept]
+    assert excluded and excluded[0]["price"] == 3000
+
+
+def test_company_view_hides_outlier_levels_and_shows_note():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-outlier"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "跑偏点位测试公司", video_id="vo1", published="2026-07-01T00:00:00Z",
+        channel="频道丁", source_link="[[n]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [
+                   {"text": "正常点位", "price": 100, "level_type": "support"},
+                   {"text": "这是别的东西的数字混进来了", "price": 5000, "level_type": "other"},
+               ]},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 101.0}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="OUT"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/跑偏点位测试公司")
+    assert r.status_code == 200
+    body = r.data.decode()
+    assert "正常点位" in body
+    # the outlier's raw text still appears in the underlying note prose (never
+    # deleted), but must not appear in the structured price-level table
+    table_html = body.split("推荐点位一览", 1)[1].split("</table>", 1)[0]
+    assert "这是别的东西的数字混进来了" not in table_html
+    assert "5000" not in table_html
+    assert "已自动隐藏 1 条" in body
+
+
+def test_company_price_level_delete_removes_row():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-delete"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "删除点位测试公司", video_id="vd1", published="2026-07-01T00:00:00Z",
+        channel="频道戊", source_link="[[n]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "待删除的点位", "price": 42,
+                                 "level_type": "support"}]},
+        con=con)
+    levels = dbm.dossier_price_levels_for(con, "删除点位测试公司")
+    assert len(levels) == 1
+    level_id = levels[0]["id"]
+
+    with mock.patch.object(dossier, "resolve_ticker", return_value=None):
+        r = client.post("/companies/删除点位测试公司/price-level/delete",
+                        data={"_csrf": gui.CSRF, "level_id": str(level_id)},
+                        follow_redirects=False)
+    assert r.status_code in (302, 303)
+    remaining = dbm.dossier_price_levels_for(con, "删除点位测试公司")
+    assert remaining == []
 
 
 if __name__ == "__main__":

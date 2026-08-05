@@ -327,12 +327,78 @@ def fetch_price_history(ticker: str, period: str = "1y") -> list[dict]:
     return out
 
 
+def filter_price_level_outliers(levels, reference: float | None):
+    """按参考价格（通常是最新收盘价，没有收盘价就退回点位自身的中位数）
+    过滤掉明显跑偏的点位——价格是参考价 20 倍以上、或者不到参考价的
+    1/20，基本可以确定是抽取时张冠李戴（比如把视频里提到的别的数字/别的
+    公司的点位算到了这家头上），图表和表格里都不应该展示，但不动数据库
+    本身（用户想恢复的话可以整体重扫）。返回 (保留的点位, 被排除的点位)。"""
+    dated = [r for r in levels if r["price"] is not None]
+    ref = reference
+    if not ref and dated:
+        prices = sorted(r["price"] for r in dated)
+        ref = prices[len(prices) // 2]
+    if not ref:
+        return list(levels), []
+    lo, hi = ref / 20.0, ref * 20.0
+    kept, excluded = [], []
+    for r in levels:
+        p = r["price"]
+        if p is not None and not (lo <= p <= hi):
+            excluded.append(r)
+        else:
+            kept.append(r)
+    return kept, excluded
+
+
 def channel_name_for_video(con, video_id: str) -> str | None:
     row = con.execute(
         "SELECT c.name FROM videos v JOIN channels c ON c.channel_id=v.channel_id "
         "WHERE v.video_id=?", (video_id,)).fetchone()
     name = row["name"] if row else None
     return name or None
+
+
+def rescan_all(cfg, con, log=None) -> dict:
+    """全量重新扫描：不是增量补跑，是彻底重来一遍。用于抽取格式升级之后
+    （比如加了频道前缀、结构化点位）让所有历史数据补齐新字段——不是简单
+    在旧内容后面追加（追加会导致新旧两份措辞不同但内容重复的条目堆在一
+    起），而是：
+
+    1. 把当前每一篇 canonical 公司笔记都归档（不删除，挪进 _归档/，文件名
+       带时间戳，不会跟之前清理时归档的旧文件冲突）；
+    2. 清空 dossier_processed（去重记录）和 dossier_price_levels（结构化
+       点位），这样每个 (公司, 视频) 都会被当成没处理过，重新走一遍抽取；
+    3. 调用 backfill_all() 重新生成——笔记从空白重新写起，所有条目都带
+       上当前版本的格式（频道前缀、结构化点位落进新表）。
+
+    dossier_entities 里的批准状态/别名/股票代码缓存不受影响，只重来"内容"
+    本身。"""
+    from . import db as dbm
+    vault_root = cfg.vault_root
+    if not vault_root:
+        return {"archived_notes": 0, "scanned": 0, "videos_with_companies": 0,
+               "companies_processed": 0}
+    canonical_names = [r["name"] for r in con.execute(
+        "SELECT name FROM dossier_entities WHERE canonical IS NULL")]
+    # 也把还没被任何 dossier_entities 行覆盖、但已经有笔记文件的旧条目算上
+    d = dossier_dir(vault_root)
+    for p in d.glob("*.md"):
+        if p.parent == d and p.stem not in canonical_names:
+            canonical_names.append(p.stem)
+    archived = 0
+    for name in canonical_names:
+        if archive_entity_note(vault_root, name):
+            archived += 1
+    con.execute("DELETE FROM dossier_processed")
+    con.execute("DELETE FROM dossier_price_levels")
+    con.commit()
+    if log:
+        log.event("dossier_rescan_reset", archived_notes=archived)
+    result = backfill_all(cfg, con, log)
+    result["archived_notes"] = archived
+    return result
+
 
 def backfill_all(cfg, con, log=None) -> dict:
     """手动补跑：把库里所有已经写过 wiki 笔记的历史文章都过一遍公司档案

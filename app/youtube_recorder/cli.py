@@ -9,6 +9,7 @@ Commands (v0.2 design §13.3):
   ytrec retry VIDEO_ID --from STAGE
   ytrec run --once                one pipeline pass (discovery lands in P3)
   ytrec dossier-backfill           补跑公司档案插件：过一遍历史文章
+  ytrec dossier-rescan             公司档案插件全量重扫（格式升级后用）
 """
 
 from __future__ import annotations
@@ -150,6 +151,20 @@ def cmd_dossier_backfill(args) -> int:
     return 0
 
 
+def cmd_dossier_rescan(args) -> int:
+    log = RunLogger()
+    cfg = cfg_mod.load()
+    con = dbm.connect()
+    from . import dossier
+    result = dossier.rescan_all(cfg, con, log)
+    _p(f"dossier rescan: archived_notes={result['archived_notes']} "
+       f"scanned={result['scanned']} "
+       f"videos_with_companies={result['videos_with_companies']} "
+       f"companies_processed={result['companies_processed']}")
+    con.close()
+    return 0
+
+
 def cmd_run(args) -> int:
     log = RunLogger()
     try:
@@ -238,6 +253,11 @@ def build_parser() -> argparse.ArgumentParser:
         "dossier-backfill",
         help="补跑公司档案插件：把库里已有的全部历史文章过一遍增量抽取")
     dbf.set_defaults(fn=cmd_dossier_backfill)
+
+    dbr = sub.add_parser(
+        "dossier-rescan",
+        help="公司档案插件全量重扫：归档旧笔记+清空处理记录，从头重新抽取一遍")
+    dbr.set_defaults(fn=cmd_dossier_rescan)
 
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")

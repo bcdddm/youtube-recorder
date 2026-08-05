@@ -13,7 +13,7 @@ from pathlib import Path
 from .paths import DB_FILE
 from . import state as st
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -116,6 +116,9 @@ CREATE TABLE IF NOT EXISTS dossier_entities (
     status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
     ticker TEXT,                    -- 雅虎财经代码缓存：NULL=没查过，
                                      -- ''=查过但确认没有，'XXXX'=真代码
+    pinned INTEGER NOT NULL DEFAULT 0,     -- 1=置顶（比如自己持有的公司）
+    pin_order INTEGER NOT NULL DEFAULT 0,  -- 置顶区块内的手动顺序，越小越靠前
+    collapsed INTEGER NOT NULL DEFAULT 0,  -- 1=在列表里折叠起来
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL
 );
@@ -135,6 +138,7 @@ CREATE INDEX IF NOT EXISTS idx_dossier_price_levels_company
     ON dossier_price_levels(company);
 CREATE INDEX IF NOT EXISTS idx_attempts_video ON attempts(video_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_writes_video ON writes(video_id, note_kind);
+CREATE INDEX IF NOT EXISTS idx_writes_notekind_at ON writes(note_kind, at);
 """
 
 
@@ -179,6 +183,9 @@ def local_time(ts: str | None) -> str:
     return dt.astimezone().strftime("%H:%M:%S") if dt else (ts or "")[11:19]
 
 
+_migrated_paths: set[Path] = set()
+
+
 def connect(path: Path = DB_FILE) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
@@ -186,7 +193,13 @@ def connect(path: Path = DB_FILE) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")  # WAL 下安全，写入显著加快
     con.execute("PRAGMA foreign_keys=ON")
-    _migrate(con)
+    # _migrate() 跑一整段 CREATE TABLE/INDEX 脚本 + 好几次 PRAGMA table_info
+    # 往返，每个请求几乎都会 connect() 一次（gui.py 里 30+ 处调用），这段开销
+    # 全白付了——同一个数据库文件这个进程只要迁移过一次，schema 就已经是最
+    # 新的了，之后每次 connect() 直接跳过即可。
+    if path not in _migrated_paths:
+        _migrate(con)
+        _migrated_paths.add(path)
     return con
 
 
@@ -234,6 +247,23 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE videos ADD COLUMN media_url TEXT")
         con.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
         con.commit()
+
+    # v7: 公司档案置顶/折叠
+    decols = {r["name"] for r in con.execute("PRAGMA table_info(dossier_entities)")}
+    if "pinned" not in decols:
+        con.execute("ALTER TABLE dossier_entities ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        con.execute("ALTER TABLE dossier_entities ADD COLUMN pin_order INTEGER NOT NULL DEFAULT 0")
+        con.execute("ALTER TABLE dossier_entities ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0")
+        con.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+        con.commit()
+
+    # 组合索引要放在 approved 列确认已经存在之后（v2 迁移才加的列，老库/
+    # 全新库走到这里才保证一定有），不能塞进最上面的 _SCHEMA 静态脚本，
+    # 不然全新数据库第一次跑 executescript 时就会报 "no such column"。
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_videos_status_approved_pub "
+        "ON videos(status, approved, published_at)")
+    con.commit()
 
 
 # --- channels ----------------------------------------------------------------
@@ -486,6 +516,37 @@ def dossier_pending_entities(con) -> list[sqlite3.Row]:
         "ORDER BY last_seen DESC").fetchall()
 
 
+def dossier_set_pinned(con, name: str, pinned: bool) -> None:
+    """置顶/取消置顶。置顶时排到置顶区块最前面（pin_order 比现有最小值还小
+    一格，永远最新置顶的排最前）；取消置顶就退回普通按更新时间排序的列表。
+    如果这个名字之前还没登记过（比如笔记是老版本直接写的文件，没走过登记
+    流程），登记成 approved——用户主动去置顶/折叠一个名字，说明他已经把
+    它当成正经条目在管理了，不该把它打回待批准队列。"""
+    if dossier_get_entity(con, name) is None:
+        dossier_register_entity(con, name, status="approved")
+    else:
+        dossier_register_entity(con, name)
+    if pinned:
+        row = con.execute(
+            "SELECT MIN(pin_order) m FROM dossier_entities WHERE pinned=1").fetchone()
+        next_order = (row["m"] - 1) if row and row["m"] is not None else 0
+        con.execute("UPDATE dossier_entities SET pinned=1, pin_order=? WHERE name=?",
+                   (next_order, name))
+    else:
+        con.execute("UPDATE dossier_entities SET pinned=0 WHERE name=?", (name,))
+    con.commit()
+
+
+def dossier_set_collapsed(con, name: str, collapsed: bool) -> None:
+    if dossier_get_entity(con, name) is None:
+        dossier_register_entity(con, name, status="approved")
+    else:
+        dossier_register_entity(con, name)
+    con.execute("UPDATE dossier_entities SET collapsed=? WHERE name=?",
+               (1 if collapsed else 0, name))
+    con.commit()
+
+
 # --- dossier_price_levels：结构化推荐点位 -----------------------------------
 
 def dossier_add_price_level(con, *, company: str, video_id: str, channel: str | None,
@@ -504,3 +565,13 @@ def dossier_price_levels_for(con, company: str) -> list[sqlite3.Row]:
     return con.execute(
         "SELECT * FROM dossier_price_levels WHERE company=? "
         "ORDER BY mentioned_date ASC, id ASC", (company,)).fetchall()
+
+
+def dossier_delete_price_level(con, level_id: int, company: str) -> bool:
+    """删除单条推荐点位（用户在表格里手动点删除）。company 用来确认删的是
+    对应公司页面的记录，防止误删。返回是否真的删了一行。"""
+    cur = con.execute(
+        "DELETE FROM dossier_price_levels WHERE id=? AND company=?",
+        (level_id, company))
+    con.commit()
+    return cur.rowcount > 0

@@ -8,6 +8,7 @@ API keys go straight to the macOS Keychain via `security`, never to disk.
 
 from __future__ import annotations
 
+import re
 import secrets
 import subprocess
 from pathlib import Path
@@ -335,6 +336,19 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
     if(id && id.length>=8){ e.preventDefault(); openPlayer(id, startOf(h), (a.textContent||'').trim().slice(0,60), h); }
     else { e.preventDefault(); openExt(h); }
   }, true);
+  // 表单提交（删除点位/置顶/折叠等）默认会整页刷新，滚动条跳回顶部——
+  // 记住提交前的滚动位置，刷新回来后原样恢复，不要乱动用户正在看的位置
+  var SCROLL_KEY = 'ytrec_scroll_' + location.pathname;
+  document.addEventListener('submit', function(){
+    try { sessionStorage.setItem(SCROLL_KEY, String(W.scrollY)); } catch(e){}
+  }, true);
+  try {
+    var savedY = sessionStorage.getItem(SCROLL_KEY);
+    if (savedY !== null) {
+      sessionStorage.removeItem(SCROLL_KEY);
+      W.scrollTo(0, parseInt(savedY, 10) || 0);
+    }
+  } catch(e){}
 })();</script><!--/YTRP--></body></html>"""
 
 
@@ -1054,10 +1068,12 @@ def channels():
             gname = (f.get("grpnew", "").strip()
                      or f.get("grpsel", "").strip())[:20]
             if gname:
+                qmarks = ",".join("?" * len(ids))
+                grp_of = {r["channel_id"]: r["grp"] for r in con.execute(
+                    f"SELECT channel_id, grp FROM channels WHERE channel_id IN ({qmarks})",
+                    ids)}
                 for i in ids:
-                    row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
-                                      (i,)).fetchone()
-                    gs = _grps_of(row["grp"] if row else "") + [gname]
+                    gs = _grps_of(grp_of.get(i, "")) + [gname]
                     con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
                                 (_grps_join(gs), i))
                 con.commit()
@@ -1067,13 +1083,15 @@ def channels():
                 msg = '<span class=bad>请选择现有组或输入新组名</span>'
         elif f.get("bulk") == "removegroup" and ids:
             target = f.get("rmgrp", "").strip()
+            qmarks = ",".join("?" * len(ids))
+            grp_of = {r["channel_id"]: r["grp"] for r in con.execute(
+                f"SELECT channel_id, grp FROM channels WHERE channel_id IN ({qmarks})",
+                ids)}
             for i in ids:
-                row = con.execute("SELECT grp FROM channels WHERE channel_id=?",
-                                  (i,)).fetchone()
-                if not row:
+                if i not in grp_of:
                     continue
                 gs = ([] if target == "__ALL__" else
-                      [x for x in _grps_of(row["grp"]) if x != target])
+                      [x for x in _grps_of(grp_of[i]) if x != target])
                 con.execute("UPDATE channels SET grp=? WHERE channel_id=?",
                             (_grps_join(gs), i))
             con.commit()
@@ -1456,9 +1474,10 @@ def queue():
         if f.get("approve"):
             dbm.approve_video(con, f["approve"])
         elif f.get("approve_all"):
-            for r in con.execute("SELECT video_id FROM videos "
-                                 "WHERE status='discovered' AND approved=0"):
-                dbm.approve_video(con, r["video_id"])
+            con.execute(
+                "UPDATE videos SET approved=1, updated_at=? "
+                "WHERE status='discovered' AND approved=0", (dbm.now(),))
+            con.commit()
         elif f.get("skip"):
             v = dbm.get_video(con, f["skip"])
             if v:
@@ -1777,17 +1796,20 @@ def _article_tag_lists(con) -> list:
     return out
 
 
-def _all_article_tags(con) -> list:
+def _all_article_tags(con, lists: list | None = None) -> list:
+    """lists 可以传入已经算好的 _article_tag_lists(con) 结果，省一遍磁盘全量
+    读取——tags_merge() 在同一个请求里既要算全部标签、又要（可选）算孤儿
+    计数，两边共用一份，不用每次都把所有 article.json 再读一遍。"""
     tags = set()
-    for lst in _article_tag_lists(con):
+    for lst in (lists if lists is not None else _article_tag_lists(con)):
         tags.update(lst)
     return sorted(tags)
 
 
-def _canon_article_counts(con, tmap: dict) -> dict:
+def _canon_article_counts(con, tmap: dict, lists: list | None = None) -> dict:
     """归并后每个规范标签被多少篇文章使用（每篇去重计一次）。"""
     counts: dict = {}
-    for lst in _article_tag_lists(con):
+    for lst in (lists if lists is not None else _article_tag_lists(con)):
         for t in {tmap.get(x, x) for x in lst}:
             counts[t] = counts.get(t, 0) + 1
     return counts
@@ -1804,7 +1826,8 @@ def tags_merge():
     import json as _j
     from . import providers
     con = _con()
-    tags = _all_article_tags(con)
+    article_tag_lists = _article_tag_lists(con)
+    tags = _all_article_tags(con, article_tag_lists)
     con.close()
     if len(tags) < 2:
         return {"ok": True, "merged": 0, "total": len(tags)}
@@ -1859,9 +1882,7 @@ def tags_merge():
     except (TypeError, ValueError):
         orphan_min = 1
     if drop_orphans:
-        con2 = _con()
-        counts = _canon_article_counts(con2, tmap)
-        con2.close()
+        counts = _canon_article_counts(None, tmap, article_tag_lists)
         # 不隐藏：用户已人工决定过的标签、以及作为某组规范名的标签
         canon_names = set(tmap.values())
         keep = set(decisions.keys()) | canon_names
@@ -2895,16 +2916,13 @@ def digest_tag_remove():
         return {"ok": False, "error": "missing tag/date"}, 400
     con = _con()
     rows = con.execute(
-        "SELECT w.video_id, c.grp cgrp FROM writes w "
+        "SELECT w.video_id, v.published_at, c.grp cgrp FROM writes w "
         "JOIN videos v USING(video_id) "
         "LEFT JOIN channels c USING(channel_id) "
         "WHERE w.note_kind='wiki'").fetchall()
-    con2 = _con()
     targets = []
     for r in rows:
-        v = con2.execute("SELECT published_at FROM videos WHERE video_id=?",
-                        (r["video_id"],)).fetchone()
-        if not v or dbm.local_date(v["published_at"]) != date:
+        if dbm.local_date(r["published_at"]) != date:
             continue
         if grp:
             raw_sel = [g.strip() for g in grp.split(",")]
@@ -2913,7 +2931,6 @@ def digest_tag_remove():
             if not ((vg & allowed) or ("" in raw_sel and not vg)):
                 continue
         targets.append(r["video_id"])
-    con2.close()
     con.close()
     removed = sum(1 for vid in targets if _remove_article_tag(vid, tag))
     # 让缓存日报重算涉及标签（下次打开即最新）
@@ -3183,42 +3200,82 @@ def _dossier_note_to_html(text: str) -> str:
     return fm + html
 
 
+_DOSSIER_NOTE_META_CACHE: dict[str, tuple[float, int, dict]] = {}
+
+
+def _dossier_note_meta(p: Path) -> dict | None:
+    """解析笔记文件开头的 company/updated 字段 + 条目数（读全文才能数
+    "\\n- [" 出现次数）。按 (mtime, size) 做内存缓存——公司档案页面
+    经常被反复打开，但笔记文件通常只在跑完一轮扫描后才会变化，绝大多数
+    请求应该完全不用碰磁盘。"""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    key = str(p)
+    cached = _DOSSIER_NOTE_META_CACHE.get(key)
+    if cached is not None and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
+    try:
+        head = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m_company = re.search(r'(?m)^company: "?([^"\n]*)"?', head)
+    m_updated = re.search(r"(?m)^updated: (.*)$", head)
+    item = {
+        "name": (m_company.group(1) if m_company else p.stem).strip(),
+        "stem": p.stem,
+        "updated": (m_updated.group(1) if m_updated else "").strip(),
+        "entries": head.count("\n- ["),
+    }
+    _DOSSIER_NOTE_META_CACHE[key] = (st.st_mtime, st.st_size, item)
+    return item
+
+
 @app.route("/companies")
 def companies_list():
     cfg = cfg_mod.load()
     root = cfg.vault_root
+    pinned_rows: list[dict] = []
     rows: list[dict] = []
+    collapsed_rows: list[dict] = []
     pending_rows: list[dict] = []
     if root and cfg.get("dossier.enabled", False):
-        import re as _re
         from . import dossier as _dossier
         con = dbm.connect()
         entity_rows = {r["name"]: r for r in con.execute(
-            "SELECT name, status, category FROM dossier_entities "
-            "WHERE canonical IS NULL")}
+            "SELECT name, status, category, pinned, pin_order, collapsed "
+            "FROM dossier_entities WHERE canonical IS NULL")}
         con.close()
         d = _dossier.dossier_dir(root)
         for p in sorted(d.glob("*.md")):
             if p.parent != d:            # 跳过 _归档 子文件夹
                 continue
-            try:
-                head = p.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            meta = _dossier_note_meta(p)
+            if meta is None:
                 continue
-            m_company = _re.search(r'(?m)^company: "?([^"\n]*)"?', head)
-            m_updated = _re.search(r"(?m)^updated: (.*)$", head)
-            name = (m_company.group(1) if m_company else p.stem).strip()
-            updated = (m_updated.group(1) if m_updated else "").strip()
+            name = meta["name"]
             ent = entity_rows.get(name)
             status = ent["status"] if ent else "approved"
             category = ent["category"] if ent else "entity"
-            item = {"name": name, "stem": p.stem, "updated": updated,
-                    "entries": head.count("\n- ["), "category": category}
+            pinned = bool(ent["pinned"]) if ent else False
+            pin_order = ent["pin_order"] if ent else 0
+            collapsed = bool(ent["collapsed"]) if ent else False
+            item = {"name": name, "stem": meta["stem"], "updated": meta["updated"],
+                    "entries": meta["entries"], "category": category,
+                    "pinned": pinned, "pin_order": pin_order}
             if status == "pending":
                 pending_rows.append(item)
             elif status != "rejected":
-                rows.append(item)
+                if pinned:
+                    pinned_rows.append(item)
+                elif collapsed:
+                    collapsed_rows.append(item)
+                else:
+                    rows.append(item)
+    pinned_rows.sort(key=lambda r: r["pin_order"])
     rows.sort(key=lambda r: r["updated"], reverse=True)
+    collapsed_rows.sort(key=lambda r: r["updated"], reverse=True)
     pending_rows.sort(key=lambda r: r["updated"], reverse=True)
 
     if not root:
@@ -3249,22 +3306,66 @@ def companies_list():
             f"<div class=card><table><tr><th>名字</th><th>已抽取</th><th>操作</th></tr>"
             f"{items}</table></div></details>")
 
-    if not rows:
-        body = pending_html + (
-            "<div class=card>还没有公司档案——文章里出现公司/实体标签后，"
-            "插件会在后台自动建档，写完一轮处理后回来看看。</div>")
-    else:
-        items = "".join(
+    def _row_html(r, *, pinned: bool) -> str:
+        pin_btn = (
+            f'<form method=post action=/companies/unpin style="display:inline" title="取消置顶">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button style="padding:0px 7px">－</button></form>'
+            if pinned else
+            f'<form method=post action=/companies/pin style="display:inline" title="置顶">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button style="padding:0px 7px">＋</button></form>')
+        collapse_btn = (
+            f'<form method=post action=/companies/collapse style="display:inline" title="折叠">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button style="padding:0px 7px">折叠</button></form>')
+        return (
             f'<tr><td><a href="/companies/{escape(r["stem"])}" '
             f'style="color:var(--acc);text-decoration:none">{escape(r["name"])}</a>'
             f'<span class=dim style="margin-left:6px">'
             f'{CATEGORY_LABELS.get(r["category"], "")}</span></td>'
             f'<td class=dim>{r["entries"]} 条</td>'
-            f'<td class=dim>{escape(r["updated"])}</td></tr>'
-            for r in rows)
-        body = pending_html + (
+            f'<td class=dim>{escape(r["updated"])}</td>'
+            f'<td style="display:flex;gap:4px">{pin_btn}{collapse_btn}</td></tr>')
+
+    pinned_html = ""
+    if pinned_rows:
+        items = "".join(_row_html(r, pinned=True) for r in pinned_rows)
+        pinned_html = (
+            f"<div class=card><h3>📌 置顶</h3><table><tr><th>公司/实体</th>"
+            f"<th>记录数</th><th>最近更新</th><th></th></tr>{items}</table></div>")
+
+    collapsed_html = ""
+    if collapsed_rows:
+        items = "".join(
+            f'<tr><td>{escape(r["name"])}</td><td class=dim>{r["entries"]} 条</td>'
+            f'<td style="display:flex;gap:8px">'
+            f'<a href="/companies/{escape(r["stem"])}" class=dim>打开</a>'
+            f'<form method=post action=/companies/uncollapse style="display:inline">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button style="padding:1px 8px">展开</button></form></td></tr>'
+            for r in collapsed_rows)
+        collapsed_html = (
+            f"<details style='margin-bottom:10px'>"
+            f"<summary class=dim>已折叠 {len(collapsed_rows)} 个</summary>"
+            f"<div class=card><table><tr><th>名字</th><th>记录数</th><th>操作</th></tr>"
+            f"{items}</table></div></details>")
+
+    if not rows and not pinned_rows:
+        body = pending_html + pinned_html + (
+            "<div class=card>还没有公司档案——文章里出现公司/实体标签后，"
+            "插件会在后台自动建档，写完一轮处理后回来看看。</div>") + collapsed_html
+    else:
+        items = "".join(_row_html(r, pinned=False) for r in rows)
+        table_html = (
             f"<div class=card><table><tr><th>公司/实体</th><th>记录数</th>"
-            f"<th>最近更新</th></tr>{items}</table></div>")
+            f"<th>最近更新</th><th></th></tr>{items}</table></div>"
+            if rows else "")
+        body = pending_html + pinned_html + table_html + collapsed_html
     return page("公司档案", "companies", body)
 
 
@@ -3295,6 +3396,50 @@ def companies_reject():
     return redirect(url_for("companies_list"))
 
 
+@app.route("/companies/pin", methods=["POST"])
+def companies_pin():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_pinned(con, name, True)
+        con.close()
+    return redirect(url_for("companies_list"))
+
+
+@app.route("/companies/unpin", methods=["POST"])
+def companies_unpin():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_pinned(con, name, False)
+        con.close()
+    return redirect(url_for("companies_list"))
+
+
+@app.route("/companies/collapse", methods=["POST"])
+def companies_collapse():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_collapsed(con, name, True)
+        con.close()
+    return redirect(url_for("companies_list"))
+
+
+@app.route("/companies/uncollapse", methods=["POST"])
+def companies_uncollapse():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_collapsed(con, name, False)
+        con.close()
+    return redirect(url_for("companies_list"))
+
+
 @app.route("/companies/<name>")
 def company_view(name: str):
     cfg = cfg_mod.load()
@@ -3312,34 +3457,65 @@ def company_view(name: str):
         con.close()
         abort(404)
     html = _dossier_note_to_html(path.read_text(encoding="utf-8"))
-    levels = dbm.dossier_price_levels_for(con, name)
+    raw_levels = dbm.dossier_price_levels_for(con, name)
     ticker = _dossier.resolve_ticker(cfg, con, name)
     history = _dossier.fetch_price_history(ticker) if ticker else []
     con.close()
 
+    reference = history[-1]["close"] if history else None
+    levels, excluded = _dossier.filter_price_level_outliers(raw_levels, reference)
+
     chart_html = _dossier_chart_html(name, ticker, history, levels)
+
+    outlier_note = ""
+    if excluded:
+        outlier_note = (
+            f'<div class=card class=dim>已自动隐藏 {len(excluded)} 条明显跑偏的点位'
+            f'（价格与参考价相差 20 倍以上，多半是抽取时张冠李戴），'
+            f'数据库里还留着，不影响之后重扫。</div>')
 
     levels_html = ""
     if levels:
         lrows = "".join(
-            f'<tr><td class=dim>{escape(r["mentioned_date"] or "")}</td>'
+            f'<tr data-date="{escape(r["mentioned_date"] or "")}">'
+            f'<td><form method=post action="/companies/{escape(name)}/price-level/delete" '
+            f'style="display:inline">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=level_id value="{r["id"]}">'
+            f'<button style="padding:1px 8px" title="删除">✕</button></form></td>'
+            f'<td class=dim>{escape(r["mentioned_date"] or "")}</td>'
             f'<td class=dim>{escape(r["channel"] or "")}</td>'
             f'<td>{escape(LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""))}</td>'
             f'<td>{r["price"] if r["price"] is not None else "-"}</td>'
             f'<td>{escape(r["raw_text"])}</td></tr>'
             for r in reversed(levels))
         levels_html = (
-            f"<div class=card><h3>推荐点位一览</h3><table>"
-            f"<tr><th>日期</th><th>频道</th><th>类型</th><th>价格</th><th>原文</th></tr>"
+            f'<div class=card><h3>推荐点位一览</h3><table id="priceLevelTable">'
+            f"<tr><th></th><th>日期</th><th>频道</th><th>类型</th><th>价格</th><th>原文</th></tr>"
             f"{lrows}</table></div>")
 
     body = f"""<div class=card style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <a class=dim href='/companies'>← 返回公司列表</a>
 <a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
 {chart_html}
+{outlier_note}
 {levels_html}
 <div class=card><div class=md>{html}</div></div>"""
     return page(name, "companies", body)
+
+
+@app.route("/companies/<name>/price-level/delete", methods=["POST"])
+def company_price_level_delete(name: str):
+    check_csrf()
+    try:
+        level_id = int(request.form.get("level_id", "0"))
+    except ValueError:
+        level_id = 0
+    if level_id:
+        con = dbm.connect()
+        dbm.dossier_delete_price_level(con, level_id, name)
+        con.close()
+    return redirect(url_for("company_view", name=name))
 
 
 def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
@@ -3354,52 +3530,131 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
     if not history:
         return (f'<div class=card class=dim>识别为 {escape(ticker)}，但暂时'
                 f'取不到历史价格（网络问题或代码有误），点位表格仍然可用。</div>')
-    scatter = [{"x": r["mentioned_date"], "y": r["price"],
-               "label": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or "")}
-              for r in levels if r["price"] is not None and r["mentioned_date"]]
+
+    dated = [r for r in levels if r["price"] is not None and r["mentioned_date"]]
+    # 按频道分组、固定调色板按"第一次出现顺序"分配颜色——同一个频道在
+    # 不同公司页面上颜色也是一致的
+    channels_order: list[str] = []
+    by_channel: dict[str, list] = {}
+    for r in dated:
+        chan = r["channel"] or "未知频道"
+        if chan not in by_channel:
+            by_channel[chan] = []
+            channels_order.append(chan)
+        by_channel[chan].append(r)
+    palette = ["#d16060", "#7aa2f7", "#e0a458", "#9ece6a", "#bb9af7",
+              "#73daca", "#f7768e", "#ff9e64", "#c0caf5", "#41a6b5"]
+    channel_groups = [{
+        "channel": chan,
+        "color": palette[i % len(palette)],
+        "points": [{"x": r["mentioned_date"], "y": r["price"],
+                   "type": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""),
+                   "text": r["raw_text"]} for r in by_channel[chan]],
+    } for i, chan in enumerate(channels_order)]
+
     cid = "chart_" + "".join(c if c.isalnum() else "" for c in name)[:24] or "chart"
     data_json = escape(_json.dumps({
         "labels": [h["date"] for h in history],
         "close": [h["close"] for h in history],
-        "levels": scatter,
+        "groups": channel_groups,
     }, ensure_ascii=False))
+    range_btns = "".join(
+        f'<button type=button class="{cls}" data-range-for="{cid}" '
+        f'data-range-days="{days}" style="padding:2px 10px">{label}</button>'
+        for days, label, cls in [
+            ("30", "近1月", ""), ("90", "近3月", ""), ("180", "近6月", ""),
+            ("365", "近1年", ""), ("all", "全部", "primary")])
     return f"""<div class=card>
-<h3>价格走势与推荐点位（{escape(ticker)}）</h3>
+<h3>价格走势与推荐点位（{escape(ticker)}）——短横线是视频里提到的点位，
+按频道上色，鼠标移上去看是谁说的、说了什么</h3>
+<div style="display:flex;gap:6px;margin-bottom:8px">{range_btns}</div>
 <canvas id="{cid}" height="90" data-chart="{data_json}"></canvas>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script>
 (function(){{
   var el = document.getElementById("{cid}");
   var d = JSON.parse(el.dataset.chart);
-  var idxOf = {{}};
-  d.labels.forEach(function(l, i){{ idxOf[l] = i; }});
-  var scatterPts = d.levels.map(function(p){{
-    var i = idxOf[p.x];
-    return i === undefined ? null : {{x: p.x, y: p.y, label: p.label}};
-  }}).filter(Boolean);
-  new Chart(el, {{
+
+  function idxOfLabels(labels){{
+    var m = {{}};
+    labels.forEach(function(l, i){{ m[l] = i; }});
+    return m;
+  }}
+  function shiftDate(ymd, days){{
+    var p = ymd.split("-").map(Number);
+    var dt = new Date(Date.UTC(p[0], p[1]-1, p[2]));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    return dt.toISOString().slice(0, 10);
+  }}
+  function buildDatasets(labels, idx2){{
+    var origIdx = idxOfLabels(d.labels);
+    var close = labels.map(function(l){{ return d.close[origIdx[l]]; }});
+    var datasets = [
+      {{label: "收盘价", data: close, borderColor: "#7aa2f7",
+        pointRadius: 0, borderWidth: 1.5, tension: 0.15}}
+    ];
+    d.groups.forEach(function(g){{
+      var pts = g.points.filter(function(p){{ return idx2[p.x] !== undefined; }})
+        .map(function(p){{
+          return {{x: p.x, y: p.y, type: p.type, text: p.text, channel: g.channel}};
+        }});
+      datasets.push({{
+        label: g.channel, data: pts, type: "scatter",
+        pointStyle: "dash", rotation: 0,
+        backgroundColor: g.color, borderColor: g.color,
+        pointRadius: 7, pointHoverRadius: 9, borderWidth: 2
+      }});
+    }});
+    return datasets;
+  }}
+
+  var chart = new Chart(el, {{
     type: "line",
-    data: {{
-      labels: d.labels,
-      datasets: [
-        {{label: "收盘价", data: d.close, borderColor: "#7aa2f7",
-          pointRadius: 0, borderWidth: 1.5, tension: 0.15}},
-        {{label: "视频提到的点位", data: scatterPts, type: "scatter",
-          backgroundColor: "#d16060", pointRadius: 5, pointHoverRadius: 7}}
-      ]
-    }},
+    data: {{labels: d.labels, datasets: buildDatasets(d.labels, idxOfLabels(d.labels))}},
     options: {{
       responsive: true,
       interaction: {{mode: "nearest", intersect: false}},
       plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
-        if (ctx.dataset.label === "视频提到的点位") {{
-          var p = ctx.raw;
-          return (p.label || "点位") + "：" + p.y;
+        var p = ctx.raw;
+        if (p && p.channel) {{
+          return [ctx.dataset.label + "：" + (p.type || "点位") + " " + p.y,
+                  p.text || ""];
         }}
         return "收盘 " + ctx.raw;
       }}}}}}}},
       scales: {{x: {{ticks: {{maxTicksLimit: 10}}}}}}
     }}
+  }});
+
+  function applyRange(days){{
+    var cutoff = null;
+    if (days !== null && d.labels.length) {{
+      cutoff = shiftDate(d.labels[d.labels.length - 1], -days);
+    }}
+    var labels = cutoff === null ? d.labels
+      : d.labels.filter(function(l){{ return l >= cutoff; }});
+    var idx2 = idxOfLabels(labels);
+    chart.data.labels = labels;
+    chart.data.datasets = buildDatasets(labels, idx2);
+    chart.update();
+    var tbl = document.getElementById("priceLevelTable");
+    if (tbl) {{
+      tbl.querySelectorAll("tbody tr[data-date]").forEach(function(tr){{
+        var dt = tr.getAttribute("data-date");
+        tr.style.display = (!dt || cutoff === null || dt >= cutoff) ? "" : "none";
+      }});
+    }}
+  }}
+
+  document.querySelectorAll('[data-range-for="{cid}"]').forEach(function(btn){{
+    btn.addEventListener("click", function(){{
+      var v = btn.getAttribute("data-range-days");
+      applyRange(v === "all" ? null : parseInt(v, 10));
+      document.querySelectorAll('[data-range-for="{cid}"]').forEach(function(b){{
+        b.classList.remove("primary");
+      }});
+      btn.classList.add("primary");
+    }});
   }});
 }})();
 </script>

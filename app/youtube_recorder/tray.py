@@ -55,6 +55,21 @@ def main() -> int:
             # 就属于本 App Bundle，不会有这个中间态。见 winapp.py 的
             # _promote_to_regular_app()（把这一个实例的 Dock 激活策略切成
             # Regular，跟托盘那个 LSUIElement 常驻实例区分开）。
+            #
+            # 新窗口进程从"起进程"到"WKWebView 真正显示出内容"实测大约
+            # 2~3 秒——瓶颈在 webview.start() 内部（AppKit/PyObjC 桥接 +
+            # WebKit 引擎冷启动），不是咱自己的 Flask/DB 代码（页面本身
+            # 200ms 内就能渲染完）。这段时间点了菜单栏什么反应都没有，
+            # 容易让人以为没点中；这里立刻把托盘图标换一下当反馈，新窗口
+            # 真正显示出来后 refresh() 下一轮（≤30s 内）会把图标换回去，
+            # 保险起见也用一次性定时器兜底稍早换回来。
+            self.title = "◐"
+
+            def _restore_title(timer):
+                timer.stop()
+                self.refresh(None)  # 重新按实际处理状态算一次 ▶︎/◉，别写死
+            rumps.Timer(_restore_title, 3).start()
+
             win_app = "/Applications/YouTube Recorder.app"
             if Path(win_app).exists():
                 subprocess.Popen(["open", "-n", win_app, "--args", "app"],

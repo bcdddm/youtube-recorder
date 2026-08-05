@@ -78,7 +78,12 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  ::selection{background:var(--accsel)}
  nav{display:flex;gap:4px;padding:10px 22px;background:var(--navbg);
      backdrop-filter:blur(12px);position:sticky;top:0;z-index:9;
-     border-bottom:1px solid var(--line);align-items:center}
+     border-bottom:1px solid var(--line);align-items:center;
+     overflow-x:auto;overflow-y:hidden}
+ /* 窗口变窄时导航栏文字不能被逐字挤破行——"公司档案"/"反馈"/品牌名这些
+    多字词一旦换行会拆成"公司档"+"案"这种断字，比整条导航栏横向滚动
+    难看得多。全部标成不换行、不收缩，容不下就让 nav 自己横向滚动。 */
+ nav a,nav .brand,nav>span,nav>button{white-space:nowrap;flex-shrink:0}
  nav a{color:var(--dim);text-decoration:none;padding:6px 16px;border-radius:9px;
        transition:all .15s}
  nav a:hover{color:var(--fg);background:var(--card2)}
@@ -99,7 +104,12 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  td.t{max-width:360px}
  .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
    overflow:hidden;white-space:normal;line-height:1.45;max-height:2.95em;
-   word-break:break-all}
+   overflow-wrap:break-word;word-break:normal}
+ /* 之前是 word-break:break-all——中文本来逐字就能换行，不需要这么猛，
+    结果连"Palantir"这种英文单词也会被拦腰砍成"Pala"+"nti…"。改成
+    overflow-wrap:break-word 之后，正常单词整只换行，只有真的长到一行都
+    塞不下的极端情况（没有空格的超长英文/链接）才会退而求其次断词，两头
+    都照顾到。 */
  input,select,textarea{background:var(--card2);color:var(--fg);
    border:1px solid var(--bord);border-radius:9px;padding:7px 11px;font:inherit;
    transition:border-color .15s}

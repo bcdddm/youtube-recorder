@@ -988,6 +988,72 @@ def test_company_price_level_delete_removes_row():
     assert remaining == []
 
 
+def test_backfill_observations_from_notes_parses_existing_note_content():
+    con = dbm.connect()
+    root = Path(_TMP) / "vault-backfill-obs"
+    root.mkdir(parents=True, exist_ok=True)
+
+    # simulate "old" data written before dossier_observations existed: no
+    # con passed in, so append_dossier_entries only touches the markdown
+    # note, nothing lands in the structured table.
+    dossier.append_dossier_entries(
+        root, "回填测试公司", video_id="标题--backfillvid1",
+        published="2026-07-15T00:00:00Z", channel="频道甲",
+        source_link="[[标题--backfillvid1]]",
+        points={"observations": ["管理层态度乐观"], "concerns": ["竞争加剧"],
+               "price_levels": []})
+    dossier.append_dossier_entries(
+        root, "回填测试公司", video_id="标题--backfillvid2",
+        published="2026-07-20T00:00:00Z", channel=None,
+        source_link="[[标题--backfillvid2]]",
+        points={"observations": ["没有频道信息的一条"], "concerns": [],
+               "price_levels": []})
+    assert dbm.dossier_observations_for_company(con, "回填测试公司") == []
+
+    result = dossier.backfill_observations_from_notes(root, con)
+    assert result["added"] == 3
+    assert result["unparsed"] == 0
+
+    rows = dbm.dossier_observations_for_company(con, "回填测试公司")
+    assert len(rows) == 3
+    by_text = {r["text"]: r for r in rows}
+    assert by_text["管理层态度乐观"]["video_id"] == "backfillvid1"
+    assert by_text["管理层态度乐观"]["channel"] == "频道甲"
+    assert by_text["管理层态度乐观"]["kind"] == "observation"
+    assert by_text["管理层态度乐观"]["mentioned_date"] == "2026-07-15"
+    assert by_text["竞争加剧"]["kind"] == "concern"
+    assert by_text["没有频道信息的一条"]["video_id"] == "backfillvid2"
+    assert by_text["没有频道信息的一条"]["channel"] is None
+
+    # idempotent: running it again doesn't duplicate existing rows
+    result2 = dossier.backfill_observations_from_notes(root, con)
+    assert result2["added"] == 0
+    assert result2["skipped_existing"] == 3
+    assert len(dbm.dossier_observations_for_company(con, "回填测试公司")) == 3
+
+
+def test_backfill_observations_then_generate_summary_end_to_end():
+    con = dbm.connect()
+    root = Path(_TMP) / "vault-backfill-summary"
+    root.mkdir(parents=True, exist_ok=True)
+
+    dossier.append_dossier_entries(
+        root, "回填总结测试公司", video_id="标题--bsvid1",
+        published="2026-07-01T00:00:00Z", channel="X",
+        source_link="[[标题--bsvid1]]",
+        points={"observations": ["历史观点一"], "concerns": [],
+               "price_levels": []})
+    dossier.backfill_observations_from_notes(root, con)
+
+    with mock.patch.object(providers, "complete",
+                           return_value="基于历史内容生成的总结"):
+        result = dossier.generate_dossier_summary(
+            _CfgFlag(True), con, "回填总结测试公司")
+    assert result is not None
+    assert dbm.dossier_get_summary(con, "回填总结测试公司")["summary"] == \
+        "基于历史内容生成的总结"
+
+
 def test_observations_for_company_uses_3mo_or_10_videos_whichever_fewer():
     from datetime import datetime, timedelta, timezone
     con = dbm.connect()

@@ -354,6 +354,74 @@ def fetch_price_history(ticker: str, period: str = "5y") -> list[dict]:
     return out
 
 
+_OBS_LINE_RE = re.compile(
+    r"^- \[(\d{4}-\d{2}-\d{2})\] (.*?)（来源：(?:(.+?) · )?\[\[([^\]]+)\]\]）$")
+
+
+def backfill_observations_from_notes(vault_root: Path, con, log=None) -> dict:
+    """一次性把现有档案笔记里"观点评价"/"关注点"小节里已经写好的内容解析
+    回 dossier_observations 结构化表——这张表是这一轮才加的，之前笔记里的
+    内容本来就有，只是没同步进结构化表，导致"AI 近期总结"对已有历史内容
+    显示"没有内容"。不调用 AI，纯本地文本解析（笔记里每一行的格式是
+    append_dossier_entries() 自己写的，是固定格式，可以稳定解析回去）。
+    已经存在的 (company, video_id, kind, text) 组合会跳过，可以安全重复
+    跑，不会出现重复条目。"""
+    from . import db as dbm
+    d = dossier_dir(vault_root)
+    scanned_notes = 0
+    added = 0
+    skipped_existing = 0
+    unparsed = 0
+    for p in sorted(d.glob("*.md")):
+        if p.parent != d:
+            continue
+        scanned_notes += 1
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m_company = re.search(r'(?m)^company: "?([^"\n]*)"?', txt)
+        company = (m_company.group(1).strip() if m_company else p.stem)
+        for key, kind in (("observations", "observation"), ("concerns", "concern")):
+            heading = SECTION_TITLES[key]
+            marker = f"## {heading}\n"
+            idx = txt.find(marker)
+            if idx == -1:
+                continue
+            start = idx + len(marker)
+            next_idx = txt.find("\n## ", start)
+            section = txt[start:next_idx if next_idx != -1 else len(txt)]
+            for line in section.splitlines():
+                line = line.strip()
+                if not line.startswith("- ["):
+                    continue
+                m = _OBS_LINE_RE.match(line)
+                if not m:
+                    unparsed += 1
+                    continue
+                date, item_text, channel, stem = m.groups()
+                video_id = stem.rsplit("--", 1)[1] if "--" in stem else None
+                if not video_id:
+                    unparsed += 1
+                    continue
+                exists = con.execute(
+                    "SELECT 1 FROM dossier_observations WHERE company=? AND "
+                    "video_id=? AND kind=? AND text=? LIMIT 1",
+                    (company, video_id, kind, item_text)).fetchone()
+                if exists:
+                    skipped_existing += 1
+                    continue
+                dbm.dossier_add_observation(
+                    con, company=company, video_id=video_id, channel=channel,
+                    mentioned_date=date, kind=kind, text=item_text,
+                    source_link=f"[[{stem}]]")
+                added += 1
+        if log:
+            log.event("dossier_backfill_observations_note", company=company)
+    return {"scanned_notes": scanned_notes, "added": added,
+           "skipped_existing": skipped_existing, "unparsed": unparsed}
+
+
 SUMMARY_SYSTEM = """你是投资研究助理。给你某家公司/实体最近一段时间、按时间从旧到新
 排列的多篇财经视频里提到的观点评价、关注点、推荐点位（每条都标了发布日期和来源频道）。
 帮我写一份"近期总结"，汇总各路主播/分析师对这家公司的看法，给我参考。

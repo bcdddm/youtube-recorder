@@ -229,6 +229,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv and getattr(sys, "frozen", False) and sys.platform == "darwin":
+        # 打包后的 App 被 Finder/`open` 不带参数启动时（比如登录启动项、
+        # 双击图标），默认进菜单栏托盘常驻模式；开窗口走 `open --args app`
+        # 单独传参，见 tray.py 的 open_win()。
+        argv = ["tray"]
     args = build_parser().parse_args(argv)
     return args.fn(args)
 

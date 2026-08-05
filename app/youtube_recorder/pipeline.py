@@ -36,6 +36,7 @@ class RunStats:
     failed: int = 0
     dead_lettered: int = 0
     notes: list[str] = field(default_factory=list)
+    vault_written_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -481,6 +482,7 @@ def write_vault(con, cfg, log, stats: RunStats) -> None:
                       detail=f"wiki={wiki_res.path.name} "
                              f"raw={'created' if raw_res else 'existing'}")
             stats.vault_written += 1
+            stats.vault_written_ids.append(vid)
         except (vt.VaultError, OSError) as e:
             dbm.end_attempt(con, aid, "error", error_code="vault", detail=str(e))
             _fail(con, log, stats, vid, st.ARTICLE_READY, st.RETRY_WRITE, str(e))
@@ -554,6 +556,7 @@ def run_once(con, cfg, log, *, headless: bool = False) -> RunStats:
         log.event("trash_purged", detail=f"{purged} expired entries")
 
     _trigger_auto_digest(stats, log)
+    _trigger_company_dossier(con, cfg, stats, log)
     return stats
 
 
@@ -568,3 +571,19 @@ def _trigger_auto_digest(stats: RunStats, log) -> None:
         _gui.maybe_autogenerate_digest(log)
     except Exception as e:
         log.event("digest_autogen_hook_failed", detail=str(e))
+
+
+def _trigger_company_dossier(con, cfg, stats: RunStats, log) -> None:
+    """公司档案插件（默认关闭，dossier.enabled）：本轮新写入 vault 的每篇
+    文章，检查它 companies 字段里还没处理过的公司，逐个跑一次增量抽取，
+    追加进对应公司的档案笔记。独立成函数便于单测。"""
+    if not stats.vault_written_ids or not cfg.get("dossier.enabled", False):
+        return
+    from . import dossier as _dossier
+    for vid in stats.vault_written_ids:
+        try:
+            n = _dossier.process_video_companies(cfg, con, vid, log)
+            if n:
+                log.event("dossier_video_processed", video_id=vid, companies=n)
+        except Exception as e:
+            log.event("dossier_hook_failed", video_id=vid, detail=str(e))

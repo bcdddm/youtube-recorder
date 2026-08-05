@@ -36,6 +36,22 @@ def py_cmd() -> list[str]:
     return [sys.executable]
 
 
+FROZEN_EXE = Path("/Applications/YouTube Recorder.app/Contents/MacOS/YouTube Recorder")
+
+
+def cli_launch_argv(*args: str) -> tuple[list[str], str | None]:
+    """构造后台无窗口子命令（如 run --once --headless）的启动参数。
+
+    优先直接跑打包好的 App 里的解释器本体（PyInstaller 打包后，
+    ``__file__`` 不再指向开发源码目录，裸 python3 + cwd 兜底那套会失效）；
+    没打包过（本地跑源码调试）就退回裸 python3 + 源码目录。
+    返回 (argv, cwd)，cwd 为 None 表示不需要显式指定工作目录。"""
+    if FROZEN_EXE.exists():
+        return [str(FROZEN_EXE), *args], None
+    dev_root = Path(__file__).resolve().parents[1]
+    return py_cmd() + ["-m", "youtube_recorder.cli", *args], str(dev_root)
+
+
 def work_dir(video_id: str) -> Path:
     """Per-video working directory (metadata, audio, transcripts, frames...)."""
     d = WORK_DIR / video_id

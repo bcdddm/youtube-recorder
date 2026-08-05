@@ -7,7 +7,6 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from pathlib import Path
 
 from . import BRANDING
 import webbrowser as _wb
@@ -44,27 +43,23 @@ def main() -> int:
                 break
             time.sleep(0.25)
 
-    _set_dock_icon()
+    _promote_to_regular_app()
     webview.create_window(BRANDING, f"http://{HOST}:{PORT}",
                           width=1120, height=820, min_size=(860, 600), js_api=_YTR_API)
     webview.start()  # blocks until window closed
     return 0
 
 
-def _set_dock_icon() -> None:
-    """裸 Python 进程在 Dock 会显示 Python 火箭图标——运行时替换为本应用图标。"""
-    candidates = [
-        "/Applications/YouTube Recorder.app/Contents/Resources/AppIcon.icns",
-        str(Path(__file__).resolve().parents[2]
-            / "YouTube Recorder.app/Contents/Resources/AppIcon.icns"),
-    ]
+def _promote_to_regular_app() -> None:
+    """本进程是打包后的 App 自己重新以 `app` 参数拉起的第二个实例（见
+    tray.py 的 open_win()），主 Info.plist 是 LSUIElement=true（托盘常驻，
+    不进 Dock）。这里把当前这一个实例的激活策略动态切回 Regular，让它
+    单独在 Dock 显示——因为走的是打包好的同一个 App Bundle（而不是裸
+    system python3 子进程），Dock 图标从进程一启动就是本 App 自己的图标，
+    不会像以前那样先闪一下系统 Python 的火箭图标再切回来。"""
     try:
-        from AppKit import NSApplication, NSImage  # pyobjc（随 pywebview 安装）
-        for p in candidates:
-            if Path(p).exists():
-                img = NSImage.alloc().initWithContentsOfFile_(p)
-                if img:
-                    NSApplication.sharedApplication().setApplicationIconImage_(img)
-                return
+        from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+        NSApplication.sharedApplication().setActivationPolicy_(
+            NSApplicationActivationPolicyRegular)
     except Exception:
-        pass  # 图标失败不影响功能
+        pass  # 拿不到 AppKit 也不影响窗口本身能不能用

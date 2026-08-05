@@ -127,6 +127,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "budget": {
         "max_monthly_cloud_usd": 20.0,
     },
+    "dossier": {
+        # 公司档案插件：默认关闭。开启后每次有新文章写入 vault，就会对
+        # 它提到的公司增量抽取观点评价/关注点/推荐点位，写进
+        # 50-公司档案/<公司>.md（按公司名建档，追加不新建/不覆盖）。
+        "enabled": False,
+    },
 }
 
 

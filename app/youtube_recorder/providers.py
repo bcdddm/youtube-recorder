@@ -234,6 +234,7 @@ PURPOSE_GROUP = {
     "chunk_notes": "article", "chunk_notes_retry": "article",
     "compose": "article", "compose_retry": "article",
     "visual_recall": "visuals", "report_qa": "qa",
+    "dossier": "article",
 }
 
 

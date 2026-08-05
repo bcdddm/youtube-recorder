@@ -207,6 +207,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <nav>
  {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('download','Download'),('api','API'),('settings','Settings')] %}
  <a href="/{{p}}" class="{{'on' if page==p else ''}}">{{l}}</a>{% endfor %}
+ {% if dossier_on %}<a href="/companies" class="{{'on' if page=='companies' else ''}}">公司档案</a>{% endif %}
  <a href=https://github.com/bcdddm/youtube-recorder/issues style='color:var(--dim);padding:4px 8px;text-decoration:none' title=GitHub反馈>💬 反馈</a><button id=themebtn style="margin-left:auto;border:none;background:transparent;color:var(--dim);padding:4px 8px;display:flex;align-items:center"></button>
  <span class="brand" style="margin-left:8px">YouTube Recorder</span>
 </nav>
@@ -731,6 +732,17 @@ EN_MAP = [
     ('下载 · YouTube Recorder', 'Download · YouTube Recorder'),
     ('加载中…', 'Loading…'),
     ('保存</button>', 'Save</button>'),
+    ("公司档案插件", "Company Dossier plugin"),
+    ("公司档案", "Company Dossier"),
+    ("公司/实体", "Company/Entity"),
+    ("记录数", "Entries"),
+    ("最近更新", "Last updated"),
+    ("还没有公司档案——", "No company dossiers yet — "),
+    ("插件会在后台自动建档，写完一轮处理后回来看看。", "the plugin builds them automatically in the background — check back after the next run."),
+    ("还没配置保存根目录（Settings → ⑤ 阅读与保存）。", "Vault root isn't configured yet (Settings → ⑤ Read & Save)."),
+    ("还没开启，去 ", "is off — turn it on in "),
+    (" 里打开。", "."),
+    ("← 返回公司列表", "← Back to companies"),
 ]
 
 
@@ -779,7 +791,9 @@ def page(title: str, page_id: str, body: str):
                 '<a href="/settings">前往设置添加 →</a></div>') + body
     return _tr(render_template_string(BASE, title=title, page=page_id,
                                       body=body, version=__version__,
-                                      digest_last_sec=_digest_last_sec()))
+                                      digest_last_sec=_digest_last_sec(),
+                                      dossier_on=cfg_mod.load().get(
+                                          "dossier.enabled", False)))
 
 
 def check_csrf():
@@ -1371,11 +1385,10 @@ def run_now():
     check_csrf()
     if _run_busy():
         return redirect(url_for("queue", busy=1))
-    from .paths import APP_SUPPORT, py_cmd
+    from .paths import APP_SUPPORT, cli_launch_argv
+    argv, cwd = cli_launch_argv("run", "--once", "--headless")
     subprocess.Popen(
-        py_cmd() + ["-m", "youtube_recorder.cli", "run", "--once",
-         "--headless"],
-        cwd=str(Path(__file__).resolve().parents[1]),
+        argv, cwd=cwd,
         stdout=open(APP_SUPPORT / "logs" / "manual-run.log", "ab"),
         stderr=subprocess.STDOUT,
         start_new_session=True)
@@ -1560,11 +1573,10 @@ refresh(); setInterval(refresh, 4000);
 @app.route("/run-now-redirect")
 def run_now_get():
     """approve 后自动触发一轮处理再回到队列页。"""
-    from .paths import APP_SUPPORT, py_cmd
+    from .paths import APP_SUPPORT, cli_launch_argv
+    argv, cwd = cli_launch_argv("run", "--once", "--headless")
     subprocess.Popen(
-        py_cmd() + ["-m", "youtube_recorder.cli", "run", "--once",
-         "--headless"],
-        cwd=str(Path(__file__).resolve().parents[1]),
+        argv, cwd=cwd,
         stdout=open(APP_SUPPORT / "logs" / "manual-run.log", "ab"),
         stderr=subprocess.STDOUT, start_new_session=True)
     return redirect(url_for("queue", started=1))
@@ -3130,6 +3142,66 @@ def api_page():
     return page('API', 'api', ''.join(p))
 
 
+# --- Company Dossier (公司档案插件，默认关闭，见 config.dossier.enabled) --------
+
+@app.route("/companies")
+def companies_list():
+    cfg = cfg_mod.load()
+    root = cfg.vault_root
+    rows = []
+    if root and cfg.get("dossier.enabled", False):
+        import re as _re
+        from . import dossier as _dossier
+        d = _dossier.dossier_dir(root)
+        for p in sorted(d.glob("*.md")):
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            m_company = _re.search(r'(?m)^company: "?([^"\n]*)"?', head)
+            m_updated = _re.search(r"(?m)^updated: (.*)$", head)
+            name = (m_company.group(1) if m_company else p.stem).strip()
+            updated = (m_updated.group(1) if m_updated else "").strip()
+            rows.append({"name": name, "stem": p.stem, "updated": updated,
+                        "entries": head.count("\n- [")})
+    rows.sort(key=lambda r: r["updated"], reverse=True)
+    if not root:
+        body = "<div class=card>还没配置保存根目录（Settings → ⑤ 阅读与保存）。</div>"
+    elif not cfg.get("dossier.enabled", False):
+        body = '<div class=card>公司档案插件还没开启，去 <a href=/settings>设置</a> 里打开。</div>'
+    elif not rows:
+        body = ("<div class=card>还没有公司档案——文章里出现公司/实体标签后，"
+                "插件会在后台自动建档，写完一轮处理后回来看看。</div>")
+    else:
+        items = "".join(
+            f'<tr><td><a href="/companies/{escape(r["stem"])}" '
+            f'style="color:var(--acc);text-decoration:none">{escape(r["name"])}</a></td>'
+            f'<td class=dim>{r["entries"]} 条</td>'
+            f'<td class=dim>{escape(r["updated"])}</td></tr>'
+            for r in rows)
+        body = (f"<div class=card><table><tr><th>公司/实体</th><th>记录数</th>"
+                f"<th>最近更新</th></tr>{items}</table></div>")
+    return page("公司档案", "companies", body)
+
+
+@app.route("/companies/<name>")
+def company_view(name: str):
+    cfg = cfg_mod.load()
+    root = cfg.vault_root
+    if not root:
+        abort(404)
+    from . import dossier as _dossier
+    path = _dossier.dossier_dir(root) / f"{name}.md"
+    if not path.exists():
+        abort(404)
+    html = _md_to_html(path.read_text(encoding="utf-8"), name)
+    body = f"""<div class=card style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+<a class=dim href='/companies'>← 返回公司列表</a>
+<a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
+<div class=card><div class=md>{html}</div></div>"""
+    return page(name, "companies", body)
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     cfg = cfg_mod.load()
@@ -3216,6 +3288,7 @@ def settings():
                 pass
             cfg.data["visuals"]["image_density"] = int(f.get("density", 3))
             cfg.data["visuals"]["enabled"] = f.get("visuals_on") == "1"
+            cfg.data.setdefault("dossier", {})["enabled"] = f.get("dossier_on") == "1"
             cfg.data["vault"]["root"] = f.get("vault_root", "").strip()
             layout = f.get("layout", "vault")
             if layout in ("vault", "folder_split", "folder_flat"):
@@ -3413,6 +3486,12 @@ def settings():
  placeholder="相对根目录，如 30-Wiki">
 &nbsp;<label><input type=checkbox name=migrate_reports value=1 checked>
  修改时把现有文章迁移过去</label></td></tr>
+<tr><td>公司档案插件</td><td><label><input type=checkbox name=dossier_on value=1
+ {'checked' if cfg.get('dossier.enabled') else ''}> 启用</label>
+ <p class=dim>默认关闭。开启后每篇新文章写入库里时，会顺带把它提到的公司/实体
+ 增量抽取「观点评价」「关注点」「推荐点位」，写进 50-公司档案/&lt;公司名&gt;.md
+ （按公司名建档，新信息持续追加进同一篇笔记，不会新建或覆盖），每条都标注来源
+ 文章。开启后导航栏会出现"公司档案"入口。</p></td></tr>
 </table>
 <p><button class=primary>保存全部设置</button></p></div>
 </form>

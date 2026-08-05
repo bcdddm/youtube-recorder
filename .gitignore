@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 *.app/
+/YouTube Recorder/
+app/scripts/AppIcon.icns
 
 # 监视文件夹与音频/转录样本（含 YouTube 内容，不入库）
 macwhisper-inbox/

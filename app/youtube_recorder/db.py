@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS writes (
     readback_ok INTEGER,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dossier_processed (
+    company TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (company, video_id)
+);
 CREATE INDEX IF NOT EXISTS idx_attempts_video ON attempts(video_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_writes_video ON writes(video_id, note_kind);
 """
@@ -359,4 +365,24 @@ def end_attempt(con, attempt_id: int, result: str,
         "UPDATE attempts SET ended_at=?, result=?, error_code=?, detail=? WHERE id=?",
         (now(), result, error_code, detail, attempt_id),
     )
+    con.commit()
+
+
+# --- 公司档案增量抽取状态（哪些 (公司, 文章) 组合已经处理过） -----------------
+
+def dossier_unprocessed(con, video_id: str, companies: list[str]) -> list[str]:
+    """给定一篇文章提到的公司列表，返回其中还没为这篇文章跑过抽取的那些。"""
+    if not companies:
+        return []
+    rows = con.execute(
+        "SELECT company FROM dossier_processed WHERE video_id=?", (video_id,)
+    ).fetchall()
+    done = {r["company"] for r in rows}
+    return [c for c in companies if c not in done]
+
+
+def dossier_mark_processed(con, video_id: str, company: str) -> None:
+    con.execute(
+        "INSERT OR IGNORE INTO dossier_processed(company, video_id, at) VALUES (?,?,?)",
+        (company, video_id, now()))
     con.commit()

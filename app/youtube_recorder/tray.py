@@ -46,18 +46,34 @@ def main() -> int:
             self.refresh(None)
 
         def open_win(self, _):
+            # 用 `open -n --args app` 重新拉起同一个打包好的 App Bundle 开
+            # 一个窗口实例——PyInstaller 把解释器整个打进 App 里，不再依赖
+            # 系统 python3。以前用裸 subprocess 跑系统 python3 时，系统的
+            # framework 版 Python 一碰 AppKit/Cocoa 就会被 macOS 自动认领成
+            # Python.framework 自己的 Resources/Python.app，Dock 图标会先闪
+            # 一下系统 Python 的火箭图标再换回来；现在整个进程从启动那一刻
+            # 就属于本 App Bundle，不会有这个中间态。见 winapp.py 的
+            # _promote_to_regular_app()（把这一个实例的 Dock 激活策略切成
+            # Regular，跟托盘那个 LSUIElement 常驻实例区分开）。
+            win_app = "/Applications/YouTube Recorder.app"
+            if Path(win_app).exists():
+                subprocess.Popen(["open", "-n", win_app, "--args", "app"],
+                                 start_new_session=True)
+                return
+            # 开发环境兜底（没打包过、直接跑源码调试用）：退回裸进程，图标可能会闪一下
             from .paths import py_cmd
             subprocess.Popen(
                 py_cmd() + ["-m", "youtube_recorder.cli", "app"],
                 cwd=str(APP_DIR), start_new_session=True)
 
         def run_now(self, _):
-            from .paths import APP_SUPPORT
-            from .paths import py_cmd
+            # 无窗口/无 AppKit 的后台任务，不用像 open_win 那样过一遍 `open`
+            # （那样反而拿不到子进程的 stdout/stderr 了）——直接跑打包好的
+            # App 里的解释器本体（或开发环境兜底），日志照常能重定向进文件。
+            from .paths import APP_SUPPORT, cli_launch_argv
+            argv, cwd = cli_launch_argv("run", "--once", "--headless")
             subprocess.Popen(
-                py_cmd() + ["-m", "youtube_recorder.cli", "run",
-                 "--once", "--headless"],
-                cwd=str(APP_DIR),
+                argv, cwd=cwd,
                 stdout=open(APP_SUPPORT / "logs" / "manual-run.log", "ab"),
                 stderr=subprocess.STDOUT, start_new_session=True)
             self.status_item.title = "已触发运行…"
@@ -84,6 +100,10 @@ def main() -> int:
                 self.status_item.title = "状态不可用"
 
         def quit_all(self, _):
+            # 匹配打包后窗口实例的进程命令行（.../MacOS/YouTube Recorder app）；
+            # 开发环境兜底那条裸 python3 路径也顺带匹配到。
+            subprocess.run(["pkill", "-f", "MacOS/YouTube Recorder app"],
+                           capture_output=True)
             subprocess.run(["pkill", "-f", "youtube_recorder.cli app"],
                            capture_output=True)
             rumps.quit_application()

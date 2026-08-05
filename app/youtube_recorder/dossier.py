@@ -25,20 +25,31 @@ DOSSIER_SYSTEM = """你是投资研究助理。给你一篇财经/科技视频�
 你要重点关注的公司/实体名称。从这篇文章里，把所有跟这家公司直接相关的信息按下面
 三类整理出来（只挑跟这家公司直接相关的内容，不要泛泛而谈整个市场或其他公司）：
 
-- observations（观点评价）：作者/主播对这家公司的看法、判断、评价
-- concerns（关注点）：提到的风险、需要观察的点、担忧
+- observations（观点评价）：作者/主播对这家公司的看法、判断、评价，字符串数组
+- concerns（关注点）：提到的风险、需要观察的点、担忧，字符串数组
 - price_levels（推荐点位）：具体提到的价格、点位、目标价、支撑/阻力位、
-  加仓/减仓的具体条件
+  加仓/减仓的具体条件——这类要结构化输出，每条是一个对象：
+  {"text": "一两句话描述，保留原文具体数字/说法",
+   "price": 具体数值(数字，没有就填 null),
+   "level_type": "support|resistance|target|stop_loss|entry|exit|other"}
+   （support=支撑位，resistance=压力/阻力位，target=目标价，
+   stop_loss=止损位，entry=建议买入/加仓点，exit=建议卖出/止盈点，
+   other=其他说不清类型的点位）
 
-每类可以有 0 条到多条，没有相关内容就是空数组。每条尽量简洁（一两句话），保留
-原文里的具体数字/说法，不要编造原文没提到的信息。
+每类可以有 0 条到多条，没有相关内容就是空数组。不要编造原文没提到的信息。
 
 只输出 JSON，不要任何其他文字：
-{"observations": ["..."], "concerns": ["..."], "price_levels": ["..."]}
+{"observations": ["..."], "concerns": ["..."],
+ "price_levels": [{"text": "...", "price": null, "level_type": "other"}]}
 """
 
 SECTION_TITLES = {"observations": "观点评价", "concerns": "关注点",
                   "price_levels": "推荐点位"}
+
+LEVEL_TYPE_LABELS = {"support": "支撑位", "resistance": "压力位",
+                     "target": "目标价", "stop_loss": "止损位",
+                     "entry": "买入/加仓点", "exit": "卖出/止盈点",
+                     "other": "点位"}
 
 
 def article_plain_text(art: dict) -> str:
@@ -52,20 +63,40 @@ def article_plain_text(art: dict) -> str:
 def extract_company_points(cfg, con, video_id: str, company: str,
                            article_text: str) -> dict:
     """对一篇文章的正文跑一次抽取，返回
-    {"observations": [...], "concerns": [...], "price_levels": [...]}。
+    {"observations": [...], "concerns": [...],
+     "price_levels": [{"text","price","level_type"}, ...]}。
     抽取失败（AI 报错/JSON 解析失败）时安静返回空结果，不阻塞主流程。"""
     user = f"公司/实体：{company}\n\n文章正文：\n{article_text}"
+    empty = {"observations": [], "concerns": [], "price_levels": []}
     try:
         reply = providers.complete(cfg, con, video_id, DOSSIER_SYSTEM, user,
-                                   max_tokens=1200, purpose="dossier")
+                                   max_tokens=1500, purpose="dossier")
         data = providers.extract_json(reply)
     except Exception:
-        return {"observations": [], "concerns": [], "price_levels": []}
+        return empty
     out = {}
-    for key in SECTION_TITLES:
+    for key in ("observations", "concerns"):
         v = data.get(key)
         out[key] = ([str(x).strip() for x in v if isinstance(x, str) and x.strip()]
                     if isinstance(v, list) else [])
+    levels = []
+    raw_levels = data.get("price_levels")
+    if isinstance(raw_levels, list):
+        for item in raw_levels:
+            if isinstance(item, str) and item.strip():
+                levels.append({"text": item.strip(), "price": None,
+                              "level_type": "other"})
+            elif isinstance(item, dict) and str(item.get("text", "")).strip():
+                price = item.get("price")
+                try:
+                    price = float(price) if price is not None else None
+                except (TypeError, ValueError):
+                    price = None
+                lt = item.get("level_type")
+                lt = lt if lt in LEVEL_TYPE_LABELS else "other"
+                levels.append({"text": str(item["text"]).strip(), "price": price,
+                              "level_type": lt})
+    out["price_levels"] = levels
     return out
 
 
@@ -119,28 +150,189 @@ def _append_under_heading(txt: str, heading: str, new_line: str) -> str:
 
 
 def append_dossier_entries(vault_root: Path, company: str, *, video_id: str,
-                           published: str, source_link: str,
-                           points: dict) -> bool:
+                           published: str, channel: str | None,
+                           source_link: str, points: dict, con=None) -> bool:
     """把一篇文章抽取出的观点/关注点/点位追加进该公司的档案笔记（按公司名
-    建档；文件已存在就在原文件基础上追加，不新建、不覆盖已有内容）。
+    建档；文件已存在就在原文件基础上追加，不新建、不覆盖已有内容）。每条
+    都标注来源频道 + 可回链的文章笔记。传了 con 的话，推荐点位还会额外写
+    一份结构化记录进 dossier_price_levels 表（供点位图/点位表用）。
     返回是否有实际写入（三类都是空的话不动笔记文件）。"""
-    if not any(points.get(k) for k in SECTION_TITLES):
+    has_any = bool(points.get("observations") or points.get("concerns")
+                  or points.get("price_levels"))
+    if not has_any:
         return False
     path = dossier_note_path(vault_root, company)
     txt = path.read_text(encoding="utf-8") if path.exists() else _new_note(company)
     date = (published or db_now())[:10]
     txt = re.sub(r"(?m)^updated: .*$", f"updated: {db_now()[:10]}", txt, count=1)
-    for key, title in SECTION_TITLES.items():
+    chan_prefix = f"{channel} · " if channel else ""
+    for key in ("observations", "concerns"):
         for item in points.get(key) or []:
-            line = f"- [{date}] {item}（来源：{source_link}）"
-            txt = _append_under_heading(txt, title, line)
+            line = f"- [{date}] {item}（来源：{chan_prefix}{source_link}）"
+            txt = _append_under_heading(txt, SECTION_TITLES[key], line)
+    for lvl in points.get("price_levels") or []:
+        text = lvl.get("text") if isinstance(lvl, dict) else str(lvl)
+        if not text:
+            continue
+        line = f"- [{date}] {text}（来源：{chan_prefix}{source_link}）"
+        txt = _append_under_heading(txt, SECTION_TITLES["price_levels"], line)
+        if con is not None and isinstance(lvl, dict):
+            from . import db as dbm
+            dbm.dossier_add_price_level(
+                con, company=company, video_id=video_id, channel=channel,
+                mentioned_date=date, level_type=lvl.get("level_type") or "other",
+                price=lvl.get("price"), raw_text=text, source_link=source_link)
     tmp = path.with_suffix(".md.tmp")
     tmp.write_text(txt, encoding="utf-8")
     tmp.replace(path)
     return True
 
 
+# --- 实体清理：合并别名 / 归档非实体（不做永久删除，只搬进归档子文件夹）----
+
+def archive_dir(vault_root: Path) -> Path:
+    d = dossier_dir(vault_root) / "_归档"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def archive_entity_note(vault_root: Path, name: str) -> bool:
+    """把一篇公司档案笔记移进归档子文件夹——不是删除，内容原样保留，只是
+    不再出现在主列表里。用于"不是真正的公司/实体"的条目，或者别名合并后
+    多出来的旧文件。真想删可以自己去归档文件夹里删。"""
+    src = dossier_note_path(vault_root, name)
+    if not src.exists():
+        return False
+    dst = archive_dir(vault_root) / src.name
+    if dst.exists():
+        stamp = db_now()[:19].replace(":", "").replace("-", "")
+        dst = archive_dir(vault_root) / f"{src.stem}-{stamp}{src.suffix}"
+    src.replace(dst)
+    return True
+
+
+def merge_entity_note(vault_root: Path, source_name: str, canonical_name: str) -> bool:
+    """把 source_name 笔记里三个小节的内容原样合并进 canonical_name 笔记
+    （去重同一模一样的行），然后把 source 笔记移进归档子文件夹。"""
+    src = dossier_note_path(vault_root, source_name)
+    if not src.exists() or source_name == canonical_name:
+        return False
+    dst = dossier_note_path(vault_root, canonical_name)
+    dst_txt = dst.read_text(encoding="utf-8") if dst.exists() else _new_note(canonical_name)
+    src_txt = src.read_text(encoding="utf-8")
+    for title in SECTION_TITLES.values():
+        marker = f"## {title}\n"
+        idx = src_txt.find(marker)
+        if idx == -1:
+            continue
+        insert_at = idx + len(marker)
+        next_idx = src_txt.find("\n## ", insert_at)
+        next_idx = len(src_txt) if next_idx == -1 else next_idx + 1
+        for line in src_txt[insert_at:next_idx].splitlines():
+            line = line.strip()
+            if line.startswith("- ["):
+                dst_txt = _append_under_heading(dst_txt, title, line)
+    dst_txt = re.sub(r"(?m)^updated: .*$", f"updated: {db_now()[:10]}", dst_txt, count=1)
+    tmp = dst.with_suffix(".md.tmp")
+    tmp.write_text(dst_txt, encoding="utf-8")
+    tmp.replace(dst)
+    archive_entity_note(vault_root, source_name)
+    return True
+
+
 # --- orchestration：一篇文章 -> 逐个未处理过的公司 ---------------------------
+
+# --- 股票代码解析 + 历史价格（点位图用） -----------------------------------
+
+# 常见实体的手工映射表：省一次 AI 调用，也避免它偶尔认错。值为 None 表示
+# "已知不是可查价格的上市标的"（比如未上市公司），跟"没配置过"区分开。
+TICKER_MAP: dict[str, str | None] = {
+    "英伟达": "NVDA", "苹果": "AAPL", "微软": "MSFT", "谷歌": "GOOGL",
+    "亚马逊": "AMZN", "Meta": "META", "特斯拉": "TSLA", "台积电": "TSM",
+    "英特尔": "INTC", "高通": "QCOM", "博通": "AVGO", "甲骨文": "ORCL",
+    "IBM": "IBM", "AMD": "AMD", "ASML": "ASML", "德州仪器": "TXN",
+    "美光科技": "MU", "SK Hynix": "000660.KS", "康宁": "GLW",
+    "Palantir": "PLTR", "Salesforce": "CRM", "ServiceNow": "NOW",
+    "PayPal": "PYPL", "Adobe": "ADBE", "SpaceX": None,
+    "Robinhood": "HOOD", "SoFi": "SOFI", "Roblox": "RBLX", "Reddit": "RDDT",
+    "联合健康": "UNH", "摩根大通": "JPM", "波音": "BA", "通用汽车": "GM",
+    "可口可乐": "KO", "埃克森美孚": "XOM", "奈飞": "NFLX",
+    "国巨": "2327.TW", "群创": "3481.TW", "聯電": "2303.TW",
+    "南亚科": "2408.TW", "菲利普莫里斯国际": "PM", "诺基亚": "NOK",
+    "阿斯利康": "AZN", "SOXL": "SOXL", "SOXX": "SOXX", "SPCX": "SPCX",
+    "纳斯达克100": "^NDX", "Rocket Lab": "RKLB", "SanDisk": "SNDK",
+}
+
+
+def _ai_resolve_ticker(cfg, con, name: str) -> str | None:
+    system = ("给你一个公司/实体的名字，回答它在雅虎财经(Yahoo Finance)上的股票/ETF/"
+             "指数代码。只输出代码本身（比如 AAPL、2330.TW、000660.KS、^NDX），不要"
+             "任何其他文字、不要解释。如果它根本不是一个可以查到历史价格的上市标的"
+             "（比如未上市公司、人物、概念），只输出 NONE。")
+    try:
+        reply = providers.complete(cfg, con, "dossier-ticker-lookup", system, name,
+                                   max_tokens=20, purpose="dossier")
+    except Exception:
+        return None
+    reply = (reply or "").strip().strip("`").strip('"')
+    reply = reply.split()[0] if reply else ""
+    if not reply or reply.upper() == "NONE":
+        return None
+    return reply
+
+
+def resolve_ticker(cfg, con, name: str) -> str | None:
+    """给一个 canonical 实体名，返回雅虎财经代码（查不到就是 None）。结果
+    缓存进 dossier_entities.ticker，同一个名字只真正查一次。"""
+    from . import db as dbm
+    row = dbm.dossier_get_entity(con, name)
+    if row is not None and row["ticker"] is not None:
+        return row["ticker"] or None
+    if name in TICKER_MAP:
+        ticker = TICKER_MAP[name]
+    else:
+        ticker = _ai_resolve_ticker(cfg, con, name)
+    dbm.dossier_register_entity(con, name)
+    con.execute("UPDATE dossier_entities SET ticker=? WHERE name=?",
+               (ticker or "", name))
+    con.commit()
+    return ticker
+
+
+_PRICE_HISTORY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_PRICE_HISTORY_TTL_SEC = 900  # 15 分钟，避免同一次浏览反复打雅虎财经
+
+
+def fetch_price_history(ticker: str, period: str = "1y") -> list[dict]:
+    """返回 [{"date": "YYYY-MM-DD", "close": 数字}, ...]，取不到（网络问题/
+    代码无效）就安静返回空列表——图表那边会优雅降级成只显示点位表。"""
+    import time
+    hit = _PRICE_HISTORY_CACHE.get(ticker)
+    if hit and time.time() - hit[0] < _PRICE_HISTORY_TTL_SEC:
+        return hit[1]
+    out: list[dict] = []
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist is not None and not hist.empty:
+            for idx, row in hist.iterrows():
+                close = row.get("Close")
+                if close is None:
+                    continue
+                out.append({"date": idx.strftime("%Y-%m-%d"),
+                           "close": round(float(close), 4)})
+    except Exception:
+        out = []
+    _PRICE_HISTORY_CACHE[ticker] = (time.time(), out)
+    return out
+
+
+def channel_name_for_video(con, video_id: str) -> str | None:
+    row = con.execute(
+        "SELECT c.name FROM videos v JOIN channels c ON c.channel_id=v.channel_id "
+        "WHERE v.video_id=?", (video_id,)).fetchone()
+    name = row["name"] if row else None
+    return name or None
 
 def backfill_all(cfg, con, log=None) -> dict:
     """手动补跑：把库里所有已经写过 wiki 笔记的历史文章都过一遍公司档案
@@ -171,8 +363,12 @@ def backfill_all(cfg, con, log=None) -> dict:
 
 
 def process_video_companies(cfg, con, video_id: str, log=None) -> int:
-    """处理一篇文章：找出它 companies 字段里还没抽取过的公司，逐个跑抽取
-    并追加进对应的公司档案笔记，标记为已处理。返回实际处理的公司数。"""
+    """处理一篇文章：解析它 companies 字段里每个原始名字对应的 canonical
+    实体（新名字自动以 pending 状态登记，见 db.dossier_resolve_entity），
+    跳过已经标记为"不是实体"的名字，把还没为这篇文章跑过抽取的 canonical
+    实体逐个抽取、追加进对应档案笔记（不管是 pending 还是 approved 都会
+    正常计算——批不批准只影响 GUI 里怎么展示，不影响这里的抽取）。
+    返回实际处理的 canonical 实体数。"""
     from .paths import work_dir
     from . import db as dbm
     aj = work_dir(video_id) / "article.json"
@@ -182,11 +378,20 @@ def process_video_companies(cfg, con, video_id: str, log=None) -> int:
         art = json.loads(aj.read_text(encoding="utf-8"))
     except Exception:
         return 0
-    companies = [c for c in (art.get("companies") or [])[:6]
-                if isinstance(c, str) and c.strip()]
-    if not companies:
+    raw_companies = [c for c in (art.get("companies") or [])[:6]
+                     if isinstance(c, str) and c.strip()]
+    if not raw_companies:
         return 0
-    todo = dbm.dossier_unprocessed(con, video_id, companies)
+    canonical_companies: list[str] = []
+    for raw in raw_companies:
+        info = dbm.dossier_resolve_entity(con, raw)
+        if info["status"] == "rejected":
+            continue
+        if info["canonical"] not in canonical_companies:
+            canonical_companies.append(info["canonical"])
+    if not canonical_companies:
+        return 0
+    todo = dbm.dossier_unprocessed(con, video_id, canonical_companies)
     if not todo:
         return 0
     vault_root = cfg.vault_root
@@ -201,13 +406,14 @@ def process_video_companies(cfg, con, video_id: str, log=None) -> int:
     video_row = con.execute(
         "SELECT published_at FROM videos WHERE video_id=?", (video_id,)).fetchone()
     published = video_row["published_at"] if video_row else ""
+    channel = channel_name_for_video(con, video_id)
     text = article_plain_text(art)
     done = 0
     for company in todo:
         points = extract_company_points(cfg, con, video_id, company, text)
         append_dossier_entries(vault_root, company, video_id=video_id,
-                               published=published, source_link=source_link,
-                               points=points)
+                               published=published, channel=channel,
+                               source_link=source_link, points=points, con=con)
         dbm.dossier_mark_processed(con, video_id, company)
         done += 1
         if log:

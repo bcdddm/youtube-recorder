@@ -32,7 +32,10 @@ hiddenimports: list = []
 # 包体积大一点也不要打包完在真机上才发现缺 import。
 for pkg in ("yt_dlp", "certifi", "anthropic", "openai", "pydantic",
            "pydantic_core", "rumps", "webview", "markdown", "httpx",
-           "httpcore", "h11", "sniffio", "anyio", "distro", "jiter", "tqdm"):
+           "httpcore", "h11", "sniffio", "anyio", "distro", "jiter", "tqdm",
+           # 公司档案插件的点位图：yfinance 拉历史价格，靠这几个撑着
+           "yfinance", "pandas", "numpy", "peewee", "multitasking",
+           "frozendict", "platformdirs", "curl_cffi", "websockets"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

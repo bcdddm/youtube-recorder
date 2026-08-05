@@ -11,6 +11,7 @@ dependencies = [
 [project.optional-dependencies]
 pipeline = ["yt-dlp>=2026.1.1"]
 ai = ["anthropic>=0.40", "openai>=1.50"]
+dossier = ["yfinance>=0.2"]
 
 [project.scripts]
 ytrec = "youtube_recorder.cli:main"

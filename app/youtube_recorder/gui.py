@@ -3144,16 +3144,63 @@ def api_page():
 
 # --- Company Dossier (公司档案插件，默认关闭，见 config.dossier.enabled) --------
 
+CATEGORY_LABELS = {"entity": "公司/实体", "index_etf": "指数/ETF"}
+LEVEL_TYPE_LABELS_ZH = {"support": "支撑位", "resistance": "压力位",
+                        "target": "目标价", "stop_loss": "止损位",
+                        "entry": "买入/加仓", "exit": "卖出/止盈",
+                        "other": "点位"}
+
+
+def _dossier_note_to_html(text: str) -> str:
+    """跟通用的 _md_to_html 不同：[[标题--videoId]] 这种带 videoId 后缀的
+    wikilink 会渲成真的可点击链接，跳回 /reports/<videoId> 阅读原文，而不
+    是只加粗成纯文本。"""
+    import re as _re
+    fm = ""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            fm_raw = text[3:end].strip()
+            text = text[end + 4:]
+            fm = (f"<details><summary class=dim>frontmatter</summary>"
+                  f"<pre>{escape(fm_raw)}</pre></details>")
+
+    def _link(m):
+        stem = m.group(1)
+        title, vid = (stem.rsplit("--", 1) if "--" in stem else (stem, None))
+        title_esc = escape(title)
+        if vid:
+            return (f'<a href="/reports/{escape(vid)}" target="_blank" '
+                    f'style="color:var(--acc)">{title_esc}</a>')
+        return f"<b>{title_esc}</b>"
+
+    text = _re.sub(r"\[\[([^\]]+)\]\]", _link, text)
+    try:
+        import markdown
+        html = markdown.markdown(text, extensions=["tables", "fenced_code"])
+    except ImportError:
+        html = "<pre style='white-space:pre-wrap'>" + str(escape(text)) + "</pre>"
+    return fm + html
+
+
 @app.route("/companies")
 def companies_list():
     cfg = cfg_mod.load()
     root = cfg.vault_root
-    rows = []
+    rows: list[dict] = []
+    pending_rows: list[dict] = []
     if root and cfg.get("dossier.enabled", False):
         import re as _re
         from . import dossier as _dossier
+        con = dbm.connect()
+        entity_rows = {r["name"]: r for r in con.execute(
+            "SELECT name, status, category FROM dossier_entities "
+            "WHERE canonical IS NULL")}
+        con.close()
         d = _dossier.dossier_dir(root)
         for p in sorted(d.glob("*.md")):
+            if p.parent != d:            # 跳过 _归档 子文件夹
+                continue
             try:
                 head = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -3162,26 +3209,90 @@ def companies_list():
             m_updated = _re.search(r"(?m)^updated: (.*)$", head)
             name = (m_company.group(1) if m_company else p.stem).strip()
             updated = (m_updated.group(1) if m_updated else "").strip()
-            rows.append({"name": name, "stem": p.stem, "updated": updated,
-                        "entries": head.count("\n- [")})
+            ent = entity_rows.get(name)
+            status = ent["status"] if ent else "approved"
+            category = ent["category"] if ent else "entity"
+            item = {"name": name, "stem": p.stem, "updated": updated,
+                    "entries": head.count("\n- ["), "category": category}
+            if status == "pending":
+                pending_rows.append(item)
+            elif status != "rejected":
+                rows.append(item)
     rows.sort(key=lambda r: r["updated"], reverse=True)
+    pending_rows.sort(key=lambda r: r["updated"], reverse=True)
+
     if not root:
-        body = "<div class=card>还没配置保存根目录（Settings → ⑤ 阅读与保存）。</div>"
-    elif not cfg.get("dossier.enabled", False):
-        body = '<div class=card>公司档案插件还没开启，去 <a href=/settings>设置</a> 里打开。</div>'
-    elif not rows:
-        body = ("<div class=card>还没有公司档案——文章里出现公司/实体标签后，"
-                "插件会在后台自动建档，写完一轮处理后回来看看。</div>")
+        return page("公司档案", "companies",
+                    "<div class=card>还没配置保存根目录（Settings → ⑤ 阅读与保存）。</div>")
+    if not cfg.get("dossier.enabled", False):
+        return page("公司档案", "companies",
+                    '<div class=card>公司档案插件还没开启，去 <a href=/settings>设置</a> 里打开。</div>')
+
+    pending_html = ""
+    if pending_rows:
+        items = "".join(
+            f'<tr><td>{escape(r["name"])}</td>'
+            f'<td class=dim>{r["entries"]} 条{"（还没建档）" if not r["entries"] else ""}</td>'
+            f'<td style="display:flex;gap:8px">'
+            f'<form method=post action=/companies/approve style="display:inline">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button class=primary style="padding:2px 10px">添加</button></form>'
+            f'<form method=post action=/companies/reject style="display:inline">'
+            f'<input type=hidden name=_csrf value="{CSRF}">'
+            f'<input type=hidden name=name value="{escape(r["name"])}">'
+            f'<button style="padding:2px 10px">忽略</button></form></td></tr>'
+            for r in pending_rows)
+        pending_html = (
+            f"<details style='margin-bottom:10px'>"
+            f"<summary class=dim>检测到 {len(pending_rows)} 个新实体，点开确认要不要建档</summary>"
+            f"<div class=card><table><tr><th>名字</th><th>已抽取</th><th>操作</th></tr>"
+            f"{items}</table></div></details>")
+
+    if not rows:
+        body = pending_html + (
+            "<div class=card>还没有公司档案——文章里出现公司/实体标签后，"
+            "插件会在后台自动建档，写完一轮处理后回来看看。</div>")
     else:
         items = "".join(
             f'<tr><td><a href="/companies/{escape(r["stem"])}" '
-            f'style="color:var(--acc);text-decoration:none">{escape(r["name"])}</a></td>'
+            f'style="color:var(--acc);text-decoration:none">{escape(r["name"])}</a>'
+            f'<span class=dim style="margin-left:6px">'
+            f'{CATEGORY_LABELS.get(r["category"], "")}</span></td>'
             f'<td class=dim>{r["entries"]} 条</td>'
             f'<td class=dim>{escape(r["updated"])}</td></tr>'
             for r in rows)
-        body = (f"<div class=card><table><tr><th>公司/实体</th><th>记录数</th>"
-                f"<th>最近更新</th></tr>{items}</table></div>")
+        body = pending_html + (
+            f"<div class=card><table><tr><th>公司/实体</th><th>记录数</th>"
+            f"<th>最近更新</th></tr>{items}</table></div>")
     return page("公司档案", "companies", body)
+
+
+@app.route("/companies/approve", methods=["POST"])
+def companies_approve():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_entity_status(con, name, "approved")
+        con.close()
+    return redirect(url_for("companies_list"))
+
+
+@app.route("/companies/reject", methods=["POST"])
+def companies_reject():
+    check_csrf()
+    name = request.form.get("name", "").strip()
+    if name:
+        con = dbm.connect()
+        dbm.dossier_set_entity_status(con, name, "rejected")
+        con.close()
+        cfg = cfg_mod.load()
+        root = cfg.vault_root
+        if root:
+            from . import dossier as _dossier
+            _dossier.archive_entity_note(root, name)   # 不删除，移进归档
+    return redirect(url_for("companies_list"))
 
 
 @app.route("/companies/<name>")
@@ -3191,15 +3302,108 @@ def company_view(name: str):
     if not root:
         abort(404)
     from . import dossier as _dossier
-    path = _dossier.dossier_dir(root) / f"{name}.md"
+    con = dbm.connect()
+    ent = dbm.dossier_get_entity(con, name)
+    if ent is not None and ent["canonical"]:          # 别名 -> 跳转到规范名
+        con.close()
+        return redirect(url_for("company_view", name=ent["canonical"]))
+    path = _dossier.dossier_note_path(root, name)
     if not path.exists():
+        con.close()
         abort(404)
-    html = _md_to_html(path.read_text(encoding="utf-8"), name)
+    html = _dossier_note_to_html(path.read_text(encoding="utf-8"))
+    levels = dbm.dossier_price_levels_for(con, name)
+    ticker = _dossier.resolve_ticker(cfg, con, name)
+    history = _dossier.fetch_price_history(ticker) if ticker else []
+    con.close()
+
+    chart_html = _dossier_chart_html(name, ticker, history, levels)
+
+    levels_html = ""
+    if levels:
+        lrows = "".join(
+            f'<tr><td class=dim>{escape(r["mentioned_date"] or "")}</td>'
+            f'<td class=dim>{escape(r["channel"] or "")}</td>'
+            f'<td>{escape(LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""))}</td>'
+            f'<td>{r["price"] if r["price"] is not None else "-"}</td>'
+            f'<td>{escape(r["raw_text"])}</td></tr>'
+            for r in reversed(levels))
+        levels_html = (
+            f"<div class=card><h3>推荐点位一览</h3><table>"
+            f"<tr><th>日期</th><th>频道</th><th>类型</th><th>价格</th><th>原文</th></tr>"
+            f"{lrows}</table></div>")
+
     body = f"""<div class=card style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <a class=dim href='/companies'>← 返回公司列表</a>
 <a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
+{chart_html}
+{levels_html}
 <div class=card><div class=md>{html}</div></div>"""
     return page(name, "companies", body)
+
+
+def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
+                        levels) -> str:
+    """点位图：折线=历史收盘价(雅虎财经)，散点=视频里提到的推荐点位（按
+    提及日期落在对应位置）。查不到股票代码/取不到历史价格就不渲染图表，
+    只留下面的点位表格。"""
+    import json as _json
+    if not ticker:
+        return ('<div class=card class=dim>没能识别出对应的股票代码，'
+                '不展示价格走势图（下面的点位表格仍然可用）。</div>')
+    if not history:
+        return (f'<div class=card class=dim>识别为 {escape(ticker)}，但暂时'
+                f'取不到历史价格（网络问题或代码有误），点位表格仍然可用。</div>')
+    scatter = [{"x": r["mentioned_date"], "y": r["price"],
+               "label": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or "")}
+              for r in levels if r["price"] is not None and r["mentioned_date"]]
+    cid = "chart_" + "".join(c if c.isalnum() else "" for c in name)[:24] or "chart"
+    data_json = escape(_json.dumps({
+        "labels": [h["date"] for h in history],
+        "close": [h["close"] for h in history],
+        "levels": scatter,
+    }, ensure_ascii=False))
+    return f"""<div class=card>
+<h3>价格走势与推荐点位（{escape(ticker)}）</h3>
+<canvas id="{cid}" height="90" data-chart="{data_json}"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+(function(){{
+  var el = document.getElementById("{cid}");
+  var d = JSON.parse(el.dataset.chart);
+  var idxOf = {{}};
+  d.labels.forEach(function(l, i){{ idxOf[l] = i; }});
+  var scatterPts = d.levels.map(function(p){{
+    var i = idxOf[p.x];
+    return i === undefined ? null : {{x: p.x, y: p.y, label: p.label}};
+  }}).filter(Boolean);
+  new Chart(el, {{
+    type: "line",
+    data: {{
+      labels: d.labels,
+      datasets: [
+        {{label: "收盘价", data: d.close, borderColor: "#7aa2f7",
+          pointRadius: 0, borderWidth: 1.5, tension: 0.15}},
+        {{label: "视频提到的点位", data: scatterPts, type: "scatter",
+          backgroundColor: "#d16060", pointRadius: 5, pointHoverRadius: 7}}
+      ]
+    }},
+    options: {{
+      responsive: true,
+      interaction: {{mode: "nearest", intersect: false}},
+      plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
+        if (ctx.dataset.label === "视频提到的点位") {{
+          var p = ctx.raw;
+          return (p.label || "点位") + "：" + p.y;
+        }}
+        return "收盘 " + ctx.raw;
+      }}}}}}}},
+      scales: {{x: {{ticks: {{maxTicksLimit: 10}}}}}}
+    }}
+  }});
+}})();
+</script>
+</div>"""
 
 
 @app.route("/settings", methods=["GET", "POST"])

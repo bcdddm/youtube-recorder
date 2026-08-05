@@ -29,7 +29,8 @@ cfg_mod.write_default_if_missing()
 FAKE_JSON = json.dumps({
     "observations": ["管理层对下半年订单展望乐观"],
     "concerns": ["地缘政治出口管制风险"],
-    "price_levels": ["800 美元一线视为支撑"]})
+    "price_levels": [{"text": "800 美元一线视为支撑", "price": 800,
+                      "level_type": "support"}]})
 
 
 class _CfgFlag:
@@ -62,6 +63,193 @@ def test_dossier_dedup_tracking():
     dbm.dossier_mark_processed(con, "vidDb01", "ASML")
 
 
+# --- db.py: dossier_entities registry (alias resolution + pending queue) ---
+
+def test_dossier_resolve_entity_registers_new_as_pending():
+    con = dbm.connect()
+    info = dbm.dossier_resolve_entity(con, "全新公司ABC")
+    assert info == {"canonical": "全新公司ABC", "status": "pending",
+                    "category": "entity", "is_new": True}
+    row = dbm.dossier_get_entity(con, "全新公司ABC")
+    assert row["status"] == "pending" and row["canonical"] is None
+
+    # seeing it again is not "new" anymore, and it shows up in the pending queue
+    info2 = dbm.dossier_resolve_entity(con, "全新公司ABC")
+    assert info2["is_new"] is False
+    pending_names = [r["name"] for r in dbm.dossier_pending_entities(con)]
+    assert "全新公司ABC" in pending_names
+
+
+def test_dossier_alias_resolves_to_canonical_and_its_status():
+    con = dbm.connect()
+    dbm.dossier_register_entity(con, "微软", category="entity", status="approved")
+    dbm.dossier_set_entity_alias(con, "微软财报", "微软")
+    info = dbm.dossier_resolve_entity(con, "微软财报")
+    assert info["canonical"] == "微软"
+    assert info["status"] == "approved"          # inherited from the target
+    assert info["is_new"] is False
+    # the alias itself never shows up as a pending item
+    pending_names = [r["name"] for r in dbm.dossier_pending_entities(con)]
+    assert "微软财报" not in pending_names
+
+
+def test_dossier_set_entity_status_rejected():
+    con = dbm.connect()
+    dbm.dossier_register_entity(con, "18A测试", status="pending")
+    dbm.dossier_set_entity_status(con, "18A测试", "rejected")
+    info = dbm.dossier_resolve_entity(con, "18A测试")
+    assert info["status"] == "rejected"
+
+
+# --- dossier.py: entity resolution gates process_video_companies -----------
+
+def test_process_video_companies_skips_rejected_entities():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossier5", "https://youtube.com/@d5", "D5")
+    dbm.upsert_discovered(con, "vidRej1", "UCdossier5", "T", "2026-07-10T00:00:00Z")
+    dbm.dossier_register_entity(con, "18A", status="rejected")
+    _write_article_json("vidRej1", ["18A"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidRej1", "wiki", "/fake/vault/30-Wiki/T--vidRej1.md", dbm.now()))
+    con.commit()
+
+    root = Path(_TMP) / "vault-rejected"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON) as m:
+        n = dossier.process_video_companies(_Cfg(), con, "vidRej1")
+    assert n == 0
+    m.assert_not_called()
+    assert not dossier.dossier_note_path(root, "18A").exists()
+
+
+def test_process_video_companies_redirects_alias_to_canonical():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossier6", "https://youtube.com/@d6", "D6")
+    dbm.upsert_discovered(con, "vidAlias1", "UCdossier6", "T", "2026-07-10T00:00:00Z")
+    dbm.dossier_register_entity(con, "微软测试", status="approved")
+    dbm.dossier_set_entity_alias(con, "微软测试财报", "微软测试")
+    _write_article_json("vidAlias1", ["微软测试财报"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidAlias1", "wiki", "/fake/vault/30-Wiki/T--vidAlias1.md", dbm.now()))
+    con.commit()
+
+    root = Path(_TMP) / "vault-alias"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        n = dossier.process_video_companies(_Cfg(), con, "vidAlias1")
+    assert n == 1
+    assert dossier.dossier_note_path(root, "微软测试").exists()
+    assert not dossier.dossier_note_path(root, "微软测试财报").exists()
+
+
+# --- dossier.py: archive / merge primitives (never hard-delete) ------------
+
+def test_archive_entity_note_moves_not_deletes():
+    root = Path(_TMP) / "vault-archive1"
+    dossier.append_dossier_entries(
+        root, "待归档公司", video_id="v1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["内容"], "concerns": [], "price_levels": []})
+    assert dossier.archive_entity_note(root, "待归档公司") is True
+    assert not dossier.dossier_note_path(root, "待归档公司").exists()
+    archived = dossier.archive_dir(root) / "待归档公司.md"
+    assert archived.exists()
+    assert "内容" in archived.read_text(encoding="utf-8")   # content preserved
+    # missing note -> no-op, doesn't raise
+    assert dossier.archive_entity_note(root, "不存在的公司") is False
+
+
+def test_merge_entity_note_combines_content_and_archives_source():
+    root = Path(_TMP) / "vault-merge1"
+    dossier.append_dossier_entries(
+        root, "PLTR测试", video_id="v1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n1]]",
+        points={"observations": ["来自PLTR别名的观点"], "concerns": [],
+               "price_levels": []})
+    dossier.append_dossier_entries(
+        root, "Palantir测试", video_id="v2", published="2026-07-02T00:00:00Z",
+        channel="Y", source_link="[[n2]]",
+        points={"observations": ["来自Palantir正名的观点"], "concerns": [],
+               "price_levels": []})
+    ok = dossier.merge_entity_note(root, "PLTR测试", "Palantir测试")
+    assert ok is True
+    # source archived, not deleted
+    assert not dossier.dossier_note_path(root, "PLTR测试").exists()
+    assert (dossier.archive_dir(root) / "PLTR测试.md").exists()
+    # canonical note now has both notes' content
+    merged = dossier.dossier_note_path(root, "Palantir测试").read_text(encoding="utf-8")
+    assert "来自PLTR别名的观点" in merged
+    assert "来自Palantir正名的观点" in merged
+
+
+# --- dossier.py: ticker resolution + price history (chart data source) -----
+
+def test_resolve_ticker_uses_static_map_without_ai_call():
+    con = dbm.connect()
+    with mock.patch.object(providers, "complete") as m:
+        t = dossier.resolve_ticker(_CfgFlag(), con, "英伟达")
+    assert t == "NVDA"
+    m.assert_not_called()          # static map hit, no need to ask AI
+    # cached: second lookup also skips both the map reasoning and any AI call
+    with mock.patch.object(providers, "complete") as m2:
+        t2 = dossier.resolve_ticker(_CfgFlag(), con, "英伟达")
+    assert t2 == "NVDA"
+    m2.assert_not_called()
+
+
+def test_resolve_ticker_known_non_public_short_circuits():
+    con = dbm.connect()
+    with mock.patch.object(providers, "complete") as m:
+        t = dossier.resolve_ticker(_CfgFlag(), con, "SpaceX")
+    assert t is None
+    m.assert_not_called()          # explicitly mapped to None, not "unknown"
+
+
+def test_resolve_ticker_falls_back_to_ai_and_caches_result():
+    con = dbm.connect()
+    with mock.patch.object(providers, "complete", return_value="FAKE123") as m:
+        t = dossier.resolve_ticker(_CfgFlag(), con, "一个不在映射表里的测试公司")
+    assert t == "FAKE123"
+    m.assert_called_once()
+    # cached now -> second call doesn't hit the AI again
+    with mock.patch.object(providers, "complete") as m2:
+        t2 = dossier.resolve_ticker(_CfgFlag(), con, "一个不在映射表里的测试公司")
+    assert t2 == "FAKE123"
+    m2.assert_not_called()
+
+
+def test_resolve_ticker_ai_says_none_caches_as_no_ticker():
+    con = dbm.connect()
+    with mock.patch.object(providers, "complete", return_value="NONE"):
+        t = dossier.resolve_ticker(_CfgFlag(), con, "一个人物测试实体")
+    assert t is None
+    row = dbm.dossier_get_entity(con, "一个人物测试实体")
+    assert row["ticker"] == ""     # cached as "checked, no ticker" not NULL
+
+
+def test_fetch_price_history_handles_failure_gracefully():
+    with mock.patch("yfinance.Ticker", side_effect=RuntimeError("network down")):
+        assert dossier.fetch_price_history("BOGUS-TICKER-XYZ") == []
+
+
 # --- dossier.py: AI extraction (mocked LLM) ---------------------------------
 
 def test_extract_company_points_success():
@@ -70,7 +258,8 @@ def test_extract_company_points_success():
     assert out == {
         "observations": ["管理层对下半年订单展望乐观"],
         "concerns": ["地缘政治出口管制风险"],
-        "price_levels": ["800 美元一线视为支撑"],
+        "price_levels": [{"text": "800 美元一线视为支撑", "price": 800.0,
+                          "level_type": "support"}],
     }
 
 
@@ -86,12 +275,23 @@ def test_extract_company_points_swallows_errors():
 
 def test_extract_company_points_ignores_non_string_items():
     reply = json.dumps({"observations": ["ok", 123, "  ", None],
-                        "concerns": "not-a-list", "price_levels": []})
+                        "concerns": "not-a-list",
+                        "price_levels": [{"text": "1500 支撑", "price": 1500,
+                                         "level_type": "support"},
+                                        {"text": ""},   # empty text -> dropped
+                                        "旧格式纯文本点位",  # legacy plain string
+                                        {"text": "怪类型", "price": "n/a",
+                                         "level_type": "bogus"},
+                                        123]})
     with mock.patch.object(providers, "complete", return_value=reply):
         out = dossier.extract_company_points(_CfgFlag(), None, "vidX", "ASML", "正文……")
     assert out["observations"] == ["ok"]
     assert out["concerns"] == []          # non-list value -> empty, not an error
-    assert out["price_levels"] == []
+    assert out["price_levels"] == [
+        {"text": "1500 支撑", "price": 1500.0, "level_type": "support"},
+        {"text": "旧格式纯文本点位", "price": None, "level_type": "other"},
+        {"text": "怪类型", "price": None, "level_type": "other"},
+    ]
 
 
 # --- dossier.py: vault note read-modify-append ------------------------------
@@ -99,17 +299,18 @@ def test_extract_company_points_ignores_non_string_items():
 def test_append_dossier_entries_new_file_then_append():
     root = Path(_TMP) / "vault-append"
     points1 = {"observations": ["看好长期成长"], "concerns": [],
-              "price_levels": ["120 美元"]}
+              "price_levels": [{"text": "120 美元", "price": 120,
+                                "level_type": "support"}]}
     ok = dossier.append_dossier_entries(
         root, "ASML测试", video_id="v1", published="2026-07-01T00:00:00Z",
-        source_link="[[note-v1]]", points=points1)
+        channel="美投侃新闻", source_link="[[note-v1]]", points=points1)
     assert ok is True
 
     path = dossier.dossier_note_path(root, "ASML测试")
     assert path.exists()
     txt = path.read_text(encoding="utf-8")
-    assert "看好长期成长（来源：[[note-v1]]）" in txt
-    assert "120 美元（来源：[[note-v1]]）" in txt
+    assert "看好长期成长（来源：美投侃新闻 · [[note-v1]]）" in txt
+    assert "120 美元（来源：美投侃新闻 · [[note-v1]]）" in txt
     assert txt.count("## 观点评价") == 1
     assert txt.count("## 关注点") == 1
     assert txt.count("## 推荐点位") == 1
@@ -118,12 +319,13 @@ def test_append_dossier_entries_new_file_then_append():
     price_idx = txt.find("## 推荐点位")
     assert obs_idx < txt.find("看好长期成长") < price_idx
 
-    # second call, different video: appends, doesn't overwrite prior content
+    # second call, different video, no channel known this time: appends,
+    # doesn't overwrite prior content, citation gracefully drops the prefix
     points2 = {"observations": ["管理层下修指引"], "concerns": ["库存高企"],
               "price_levels": []}
     ok2 = dossier.append_dossier_entries(
         root, "ASML测试", video_id="v2", published="2026-07-05T00:00:00Z",
-        source_link="[[note-v2]]", points=points2)
+        channel=None, source_link="[[note-v2]]", points=points2)
     assert ok2 is True
     txt2 = path.read_text(encoding="utf-8")
     assert "看好长期成长" in txt2                      # old content preserved
@@ -135,7 +337,7 @@ def test_append_dossier_entries_new_file_then_append():
     # same points submitted again: exact-duplicate line is not inserted twice
     dossier.append_dossier_entries(
         root, "ASML测试", video_id="v2", published="2026-07-05T00:00:00Z",
-        source_link="[[note-v2]]", points=points2)
+        channel=None, source_link="[[note-v2]]", points=points2)
     txt3 = path.read_text(encoding="utf-8")
     assert txt3.count("管理层下修指引（来源：[[note-v2]]）") == 1
 
@@ -145,9 +347,29 @@ def test_append_dossier_entries_empty_points_is_noop():
     empty = {"observations": [], "concerns": [], "price_levels": []}
     ok = dossier.append_dossier_entries(
         root, "空壳公司", video_id="v1", published="2026-07-01T00:00:00Z",
-        source_link="[[x]]", points=empty)
+        channel="X", source_link="[[x]]", points=empty)
     assert ok is False
     assert not dossier.dossier_note_path(root, "空壳公司").exists()
+
+
+def test_append_dossier_entries_writes_structured_price_levels_to_db():
+    con = dbm.connect()
+    root = Path(_TMP) / "vault-pricelevels"
+    points = {"observations": [], "concerns": [],
+             "price_levels": [{"text": "1200 视为压力位", "price": 1200,
+                               "level_type": "resistance"},
+                              {"text": "定性描述没有具体数字", "price": None,
+                               "level_type": "other"}]}
+    dossier.append_dossier_entries(
+        root, "测试点位公司", video_id="vpl1", published="2026-07-01T00:00:00Z",
+        channel="频道A", source_link="[[note-vpl1]]", points=points, con=con)
+    rows = dbm.dossier_price_levels_for(con, "测试点位公司")
+    assert len(rows) == 2
+    by_type = {r["level_type"]: r for r in rows}
+    assert by_type["resistance"]["price"] == 1200.0
+    assert by_type["resistance"]["channel"] == "频道A"
+    assert by_type["resistance"]["mentioned_date"] == "2026-07-01"
+    assert by_type["other"]["price"] is None
 
 
 # --- pipeline.py: trigger gating --------------------------------------------
@@ -350,12 +572,13 @@ def test_companies_routes():
     # phase 3: write two dossier notes directly, then list + view them
     dossier.append_dossier_entries(
         gvault, "英伟达", video_id="vg1", published="2026-07-01T00:00:00Z",
-        source_link="[[note-vg1]]",
+        channel="频道甲", source_link="[[note-vg1]]",
         points={"observations": ["数据中心需求强劲"], "concerns": [],
-               "price_levels": ["120 美元一线"]})
+               "price_levels": [{"text": "120 美元一线", "price": 120,
+                                 "level_type": "support"}]})
     dossier.append_dossier_entries(
         gvault, "台积电", video_id="vg2", published="2026-07-02T00:00:00Z",
-        source_link="[[note-vg2]]",
+        channel="频道乙", source_link="[[note-vg2]]",
         points={"observations": [], "concerns": ["先进制程扩产不及预期"],
                "price_levels": []})
 
@@ -364,13 +587,147 @@ def test_companies_routes():
     assert "英伟达".encode() in r.data
     assert "台积电".encode() in r.data
 
-    r = client.get("/companies/英伟达")
+    # avoid a real network hit to Yahoo Finance during tests
+    with mock.patch.object(dossier, "fetch_price_history", return_value=[]):
+        r = client.get("/companies/英伟达")
     assert r.status_code == 200
     assert "数据中心需求强劲".encode() in r.data
     assert "120 美元一线".encode() in r.data
-    assert "note-vg1".encode() in r.data          # source citation rendered
+    assert "频道甲".encode() in r.data             # channel name shown
 
     assert client.get("/companies/不存在的公司").status_code == 404
+
+
+def test_companies_pending_queue_approve_and_reject():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-pending"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dbm.dossier_register_entity(con, "待批准测试公司", status="pending")
+    dossier.append_dossier_entries(
+        gvault, "待批准测试公司", video_id="vp1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["内容"], "concerns": [], "price_levels": []})
+
+    r = client.get("/companies")
+    assert "检测到".encode() in r.data
+    assert "待批准测试公司".encode() in r.data
+
+    # approve: moves into the main table (still shows on next load)
+    r = client.post("/companies/approve", data={"_csrf": gui.CSRF,
+                    "name": "待批准测试公司"}, follow_redirects=True)
+    assert r.status_code == 200
+    info = dbm.dossier_resolve_entity(con, "待批准测试公司")
+    assert info["status"] == "approved"
+
+    # a second pending one gets rejected -> archived, not deleted
+    dbm.dossier_register_entity(con, "待拒绝测试实体", status="pending")
+    dossier.append_dossier_entries(
+        gvault, "待拒绝测试实体", video_id="vp2", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["占位内容"], "concerns": [], "price_levels": []})
+    r = client.post("/companies/reject", data={"_csrf": gui.CSRF,
+                    "name": "待拒绝测试实体"}, follow_redirects=True)
+    assert r.status_code == 200
+    assert dbm.dossier_resolve_entity(con, "待拒绝测试实体")["status"] == "rejected"
+    assert not dossier.dossier_note_path(gvault, "待拒绝测试实体").exists()
+    assert (dossier.archive_dir(gvault) / "待拒绝测试实体.md").exists()
+    assert "待拒绝测试实体".encode() not in client.get("/companies").data
+
+
+def test_company_view_redirects_alias_to_canonical():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-alias"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dbm.dossier_register_entity(con, "谷歌测试", status="approved")
+    dbm.dossier_set_entity_alias(con, "阿法贝测试", "谷歌测试")
+    dossier.append_dossier_entries(
+        gvault, "谷歌测试", video_id="vg1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["内容"], "concerns": [], "price_levels": []})
+
+    r = client.get("/companies/阿法贝测试", follow_redirects=False)
+    assert r.status_code == 302
+    import urllib.parse
+    assert urllib.parse.unquote(r.headers["Location"]).endswith("/companies/谷歌测试")
+
+
+def test_company_view_renders_price_level_table_and_clickable_source():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-levels"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "点位表测试公司", video_id="vt1", published="2026-07-03T00:00:00Z",
+        channel="频道丙", source_link="[[标题--realvid123]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "2000 是压力位", "price": 2000,
+                                 "level_type": "resistance"}]},
+        con=con)
+
+    # avoid a real AI/network hit for ticker resolution during tests
+    with mock.patch.object(dossier, "resolve_ticker", return_value=None):
+        r = client.get("/companies/点位表测试公司")
+    assert r.status_code == 200
+    assert "推荐点位一览".encode() in r.data
+    assert "压力位".encode() in r.data
+    assert b"2000" in r.data
+    assert "频道丙".encode() in r.data
+    # the [[标题--realvid123]] citation became a real clickable link
+    assert b'href="/reports/realvid123"' in r.data
+    assert "没能识别出对应的股票代码".encode() in r.data
+
+
+def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "图表测试公司", video_id="vc1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "100 支撑", "price": 100,
+                                 "level_type": "support"}]},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 95.0},
+                {"date": "2026-07-02", "close": 101.0}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="FAKE"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/图表测试公司")
+    assert r.status_code == 200
+    assert b"chart.js" in r.data
+    assert "价格走势与推荐点位（FAKE）".encode() in r.data
+    assert b"2026-07-01" in r.data and b"95.0" in r.data
 
 
 if __name__ == "__main__":

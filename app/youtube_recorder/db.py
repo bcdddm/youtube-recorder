@@ -109,6 +109,30 @@ CREATE TABLE IF NOT EXISTS dossier_processed (
     at TEXT NOT NULL,
     PRIMARY KEY (company, video_id)
 );
+CREATE TABLE IF NOT EXISTS dossier_entities (
+    name TEXT PRIMARY KEY,          -- 原始名字，可能本身就是 canonical
+    canonical TEXT,                 -- 非空=这是个别名，指向真正的 canonical name
+    category TEXT NOT NULL DEFAULT 'entity',  -- entity | index_etf
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    ticker TEXT,                    -- 雅虎财经代码缓存：NULL=没查过，
+                                     -- ''=查过但确认没有，'XXXX'=真代码
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dossier_price_levels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,          -- canonical name
+    video_id TEXT NOT NULL,
+    channel TEXT,
+    mentioned_date TEXT,            -- 视频发布日期 YYYY-MM-DD
+    level_type TEXT,                -- support | resistance | target | stop_loss | entry | exit | other
+    price REAL,
+    raw_text TEXT NOT NULL,
+    source_link TEXT,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dossier_price_levels_company
+    ON dossier_price_levels(company);
 CREATE INDEX IF NOT EXISTS idx_attempts_video ON attempts(video_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_writes_video ON writes(video_id, note_kind);
 """
@@ -386,3 +410,97 @@ def dossier_mark_processed(con, video_id: str, company: str) -> None:
         "INSERT OR IGNORE INTO dossier_processed(company, video_id, at) VALUES (?,?,?)",
         (company, video_id, now()))
     con.commit()
+
+
+# --- dossier_entities：登记表（别名解析 + 待批准队列） -----------------------
+
+def dossier_get_entity(con, name: str) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM dossier_entities WHERE name=?", (name,)).fetchone()
+
+
+def dossier_register_entity(con, name: str, *, category: str = "entity",
+                            status: str = "pending", canonical: str | None = None
+                            ) -> sqlite3.Row:
+    """登记一个原始名字（如果已经登记过，只刷新 last_seen，不改已有状态）。
+    返回登记后的行。"""
+    row = dossier_get_entity(con, name)
+    ts = now()
+    if row is None:
+        con.execute(
+            "INSERT INTO dossier_entities(name, canonical, category, status, "
+            "first_seen, last_seen) VALUES (?,?,?,?,?,?)",
+            (name, canonical, category, status, ts, ts))
+        con.commit()
+        return dossier_get_entity(con, name)
+    con.execute("UPDATE dossier_entities SET last_seen=? WHERE name=?", (ts, name))
+    con.commit()
+    return dossier_get_entity(con, name)
+
+
+def dossier_set_entity_status(con, name: str, status: str) -> None:
+    con.execute("UPDATE dossier_entities SET status=? WHERE name=?", (status, name))
+    con.commit()
+
+
+def dossier_set_entity_alias(con, name: str, canonical: str) -> None:
+    """把 name 登记为 canonical 的别名（合并时用）。"""
+    row = dossier_get_entity(con, name)
+    ts = now()
+    if row is None:
+        con.execute(
+            "INSERT INTO dossier_entities(name, canonical, category, status, "
+            "first_seen, last_seen) VALUES (?,?,?,?,?,?)",
+            (name, canonical, "entity", "approved", ts, ts))
+    else:
+        con.execute("UPDATE dossier_entities SET canonical=? WHERE name=?",
+                    (canonical, name))
+    con.commit()
+
+
+def dossier_resolve_entity(con, name: str) -> dict:
+    """给一个原始名字，返回 {canonical, status, category, is_new}。没登记过
+    的名字会以 status='pending' 自动登记（自己就是 canonical）。"""
+    row = dossier_get_entity(con, name)
+    if row is None:
+        dossier_register_entity(con, name)
+        return {"canonical": name, "status": "pending", "category": "entity",
+                "is_new": True}
+    con.execute("UPDATE dossier_entities SET last_seen=? WHERE name=?",
+               (now(), name))
+    con.commit()
+    if row["canonical"]:
+        target = dossier_get_entity(con, row["canonical"])
+        status = target["status"] if target else row["status"]
+        category = target["category"] if target else row["category"]
+        canonical = row["canonical"]
+    else:
+        status, category, canonical = row["status"], row["category"], row["name"]
+    return {"canonical": canonical, "status": status, "category": category,
+           "is_new": False}
+
+
+def dossier_pending_entities(con) -> list[sqlite3.Row]:
+    return con.execute(
+        "SELECT * FROM dossier_entities WHERE status='pending' AND canonical IS NULL "
+        "ORDER BY last_seen DESC").fetchall()
+
+
+# --- dossier_price_levels：结构化推荐点位 -----------------------------------
+
+def dossier_add_price_level(con, *, company: str, video_id: str, channel: str | None,
+                            mentioned_date: str | None, level_type: str | None,
+                            price: float | None, raw_text: str,
+                            source_link: str | None) -> None:
+    con.execute(
+        "INSERT INTO dossier_price_levels(company, video_id, channel, mentioned_date, "
+        "level_type, price, raw_text, source_link, at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (company, video_id, channel, mentioned_date, level_type, price, raw_text,
+         source_link, now()))
+    con.commit()
+
+
+def dossier_price_levels_for(con, company: str) -> list[sqlite3.Row]:
+    return con.execute(
+        "SELECT * FROM dossier_price_levels WHERE company=? "
+        "ORDER BY mentioned_date ASC, id ASC", (company,)).fetchall()

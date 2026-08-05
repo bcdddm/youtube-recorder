@@ -3581,6 +3581,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
     提及日期落在对应位置）。查不到股票代码/取不到历史价格就不渲染图表，
     只留下面的点位表格。"""
     import json as _json
+    from . import dossier as _dossier
     if not ticker:
         return ('<div class=card class=dim>没能识别出对应的股票代码，'
                 '不展示价格走势图（下面的点位表格仍然可用）。</div>')
@@ -3589,16 +3590,32 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
                 f'取不到历史价格（网络问题或代码有误），点位表格仍然可用。</div>')
 
     dated = [r for r in levels if r["price"] is not None and r["mentioned_date"]]
-    # 按频道分组、固定调色板按"第一次出现顺序"分配颜色——同一个频道在
-    # 不同公司页面上颜色也是一致的
+    # 同一天里价格相近的点位先聚类合并——簇长度 1 的（没有可合并的搭档）
+    # 照旧按频道分组、走原来的短横线标记；簇长度 >1 的合并成一个"合并
+    # 点位"，用另一种醒目的标记单独画，鼠标移上去能看到簇里每一条的
+    # 频道/类型/价格/原文。
+    clusters = _dossier.cluster_nearby_price_levels(dated)
     channels_order: list[str] = []
     by_channel: dict[str, list] = {}
-    for r in dated:
-        chan = r["channel"] or "未知频道"
-        if chan not in by_channel:
-            by_channel[chan] = []
-            channels_order.append(chan)
-        by_channel[chan].append(r)
+    merged_points: list[dict] = []
+    for cluster in clusters:
+        if len(cluster) == 1:
+            r = cluster[0]
+            chan = r["channel"] or "未知频道"
+            if chan not in by_channel:
+                by_channel[chan] = []
+                channels_order.append(chan)
+            by_channel[chan].append(r)
+        else:
+            avg_price = round(sum(r["price"] for r in cluster) / len(cluster), 4)
+            merged_points.append({
+                "x": cluster[0]["mentioned_date"], "y": avg_price,
+                "items": [{"channel": r["channel"] or "未知频道",
+                          "type": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""),
+                          "price": r["price"], "text": r["raw_text"]} for r in cluster],
+            })
+    # 按频道分组、固定调色板按"第一次出现顺序"分配颜色——同一个频道在
+    # 不同公司页面上颜色也是一致的
     palette = ["#d16060", "#7aa2f7", "#e0a458", "#9ece6a", "#bb9af7",
               "#73daca", "#f7768e", "#ff9e64", "#c0caf5", "#41a6b5"]
     channel_groups = [{
@@ -3614,6 +3631,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
         "labels": [h["date"] for h in history],
         "close": [h["close"] for h in history],
         "groups": channel_groups,
+        "merged": merged_points,
     }, ensure_ascii=False))
     range_btns = "".join(
         f'<button type=button class="{cls}" data-range-for="{cid}" '
@@ -3623,7 +3641,8 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
             ("365", "近1年", ""), ("1825", "近5年", ""), ("all", "全部", "primary")])
     return f"""<div class=card>
 <h3>价格走势与推荐点位（{escape(ticker)}）——短横线是视频里提到的点位，
-按频道上色，鼠标移上去看是谁说的、说了什么</h3>
+按频道上色；同一天价格相近（2% 以内）的点位合并成金色菱形显示，鼠标
+移上去看是谁说的、说了什么</h3>
 <div style="display:flex;gap:6px;margin-bottom:8px">{range_btns}</div>
 <canvas id="{cid}" height="90" data-chart="{data_json}"></canvas>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -3662,6 +3681,16 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
         pointRadius: 7, pointHoverRadius: 9, borderWidth: 2
       }});
     }});
+    var mpts = (d.merged || []).filter(function(p){{ return idx2[p.x] !== undefined; }})
+      .map(function(p){{ return {{x: p.x, y: p.y, items: p.items}}; }});
+    if (mpts.length) {{
+      datasets.push({{
+        label: "合并点位", data: mpts, type: "scatter",
+        pointStyle: "rectRot", rotation: 0,
+        backgroundColor: "#e0a458", borderColor: "#1b1b1f",
+        pointRadius: 8, pointHoverRadius: 11, borderWidth: 2
+      }});
+    }}
     return datasets;
   }}
 
@@ -3673,6 +3702,14 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
       interaction: {{mode: "nearest", intersect: false}},
       plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
         var p = ctx.raw;
+        if (p && p.items) {{
+          var lines = [];
+          p.items.forEach(function(it){{
+            lines.push(it.channel + "：" + (it.type || "点位") + " " + it.price);
+            if (it.text) lines.push(it.text);
+          }});
+          return lines;
+        }}
         if (p && p.channel) {{
           return [ctx.dataset.label + "：" + (p.type || "点位") + " " + p.y,
                   p.text || ""];

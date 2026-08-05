@@ -902,6 +902,45 @@ def test_dossier_chart_groups_points_by_channel_with_distinct_colors():
     assert "甲说的点位" in body and "乙说的点位" in body
 
 
+def test_dossier_chart_merges_same_day_nearby_price_levels():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart-merge"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    # same day, prices 1.3% apart -> should merge into one "合并点位" marker
+    dossier.append_dossier_entries(
+        gvault, "合并点位测试公司", video_id="vm1", published="2026-07-01T00:00:00Z",
+        channel="频道甲", source_link="[[n1]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "甲说150支撑", "price": 150,
+                                 "level_type": "support"}]},
+        con=con)
+    dossier.append_dossier_entries(
+        gvault, "合并点位测试公司", video_id="vm2", published="2026-07-01T00:00:00Z",
+        channel="频道乙", source_link="[[n2]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "乙说152支撑", "price": 152,
+                                 "level_type": "support"}]},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 151.0}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="FAKEMERGE"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/合并点位测试公司")
+    assert r.status_code == 200
+    body = r.data.decode()
+    assert "合并点位" in body
+    assert "rectRot" in body
+    assert "甲说150支撑" in body and "乙说152支撑" in body
+    assert "2% 以内" in body
+
+
 def test_filter_price_level_outliers_drops_20x_off_points():
     rows = [
         {"price": 120}, {"price": 150}, {"price": 160},   # cluster near ref
@@ -918,6 +957,53 @@ def test_filter_price_level_outliers_falls_back_to_median_without_reference():
     kept, excluded = dossier.filter_price_level_outliers(rows, reference=None)
     assert 3000 not in [r["price"] for r in kept]
     assert excluded and excluded[0]["price"] == 3000
+
+
+def _lv(date, price, channel="X", level_type="support", text="t"):
+    return {"mentioned_date": date, "price": price, "channel": channel,
+           "level_type": level_type, "raw_text": text}
+
+
+def test_cluster_nearby_price_levels_merges_same_day_close_prices():
+    rows = [_lv("2026-08-01", 150, channel="甲频道"),
+           _lv("2026-08-01", 152, channel="乙频道")]  # 152 is 1.3% above 150
+    clusters = dossier.cluster_nearby_price_levels(rows)
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 2
+    assert {r["channel"] for r in clusters[0]} == {"甲频道", "乙频道"}
+
+
+def test_cluster_nearby_price_levels_keeps_far_apart_prices_separate():
+    rows = [_lv("2026-08-01", 100), _lv("2026-08-01", 120)]  # 20% apart
+    clusters = dossier.cluster_nearby_price_levels(rows)
+    assert len(clusters) == 2
+    assert all(len(c) == 1 for c in clusters)
+
+
+def test_cluster_nearby_price_levels_does_not_merge_across_different_days():
+    rows = [_lv("2026-08-01", 150), _lv("2026-08-02", 150.5)]
+    clusters = dossier.cluster_nearby_price_levels(rows)
+    assert len(clusters) == 2
+    assert all(len(c) == 1 for c in clusters)
+
+
+def test_cluster_nearby_price_levels_unpriced_rows_stay_singleton():
+    rows = [_lv("2026-08-01", None, text="没有具体数字"),
+           _lv("2026-08-01", None, text="另一条没数字的")]
+    clusters = dossier.cluster_nearby_price_levels(rows)
+    assert len(clusters) == 2
+    assert all(len(c) == 1 for c in clusters)
+
+
+def test_cluster_nearby_price_levels_uses_cluster_anchor_not_chain():
+    # 100 -> 101.5 差 1.5% 合并；101.5 -> 103 差 1.5%(vs 101.5) 但
+    # 相对簇内最低价 100 已经差 3%，超过 2% 阈值，应该另起一簇——
+    # 验证的是"基准是簇内最低价"而不是"链式跟上一条比"。
+    rows = [_lv("2026-08-01", 100), _lv("2026-08-01", 101.5),
+           _lv("2026-08-01", 103)]
+    clusters = dossier.cluster_nearby_price_levels(rows)
+    sizes = sorted(len(c) for c in clusters)
+    assert sizes == [1, 2]
 
 
 def test_company_view_hides_outlier_levels_and_shows_note():

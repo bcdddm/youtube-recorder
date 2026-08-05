@@ -519,6 +519,51 @@ def filter_price_level_outliers(levels, reference: float | None):
     return kept, excluded
 
 
+# 同一天内两条点位价差在这个比例以内，视为"同一个位置"可以合并显示——
+# 技术分析里支撑/压力位本来就不是一个精确数字，2% 以内的差异基本就是
+# 同一个位置的不同说法（比如一个说 150、一个说 152），再往上比如 5%、
+# 10% 往往已经是不同的位置了，合并反而会抹掉有意义的区别，所以选了一个
+# 比较保守的阈值。
+PRICE_CLUSTER_PCT = 0.02
+
+
+def cluster_nearby_price_levels(levels, pct_threshold: float = PRICE_CLUSTER_PCT):
+    """把同一天(mentioned_date 完全相同)、价格相近(价差 <= pct_threshold *
+    价格)的点位聚成一簇，图表上合并成一个点显示，避免同一天挤出好几个
+    几乎一样的点位、看着乱。只影响图表怎么画，不改数据库、不改下面的
+    点位表格——表格还是逐条列出，方便单独删除。
+
+    没有价格的点位（price is None）各自单独一簇，不参与聚类（没数字没法
+    比"相近"）。按价格从低到高排序后贪心聚类：跟"这一簇里最低价"的差
+    在阈值内就并进来，一超过阈值就另起一簇——用簇内最低价当基准而不是
+    逐个比较上一条，是为了避免"A 跟 B 近、B 跟 C 近，但 A 跟 C 已经差
+    很远"这种链式漂移把明显不同的两个位置也粘到一起。
+
+    返回一个"簇"的列表，每个簇是原始点位行的列表（长度 1 = 没有能合并
+    的搭档，长度 >1 = 合并了）。"""
+    from collections import defaultdict
+    by_date: dict[str, list] = defaultdict(list)
+    for r in levels:
+        by_date[r["mentioned_date"] or ""].append(r)
+    clusters = []
+    for rows in by_date.values():
+        priced = sorted((r for r in rows if r["price"] is not None),
+                        key=lambda r: r["price"])
+        unpriced = [r for r in rows if r["price"] is None]
+        cur: list = []
+        for r in priced:
+            if cur and r["price"] - cur[0]["price"] <= pct_threshold * cur[0]["price"]:
+                cur.append(r)
+            else:
+                if cur:
+                    clusters.append(cur)
+                cur = [r]
+        if cur:
+            clusters.append(cur)
+        clusters.extend([r] for r in unpriced)
+    return clusters
+
+
 def channel_name_for_video(con, video_id: str) -> str | None:
     row = con.execute(
         "SELECT c.name FROM videos v JOIN channels c ON c.channel_id=v.channel_id "

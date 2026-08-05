@@ -321,11 +321,13 @@ _PRICE_HISTORY_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PRICE_HISTORY_TTL_SEC = 900  # 15 分钟，避免同一次浏览反复打雅虎财经
 
 
-def fetch_price_history(ticker: str, period: str = "1y") -> list[dict]:
+def fetch_price_history(ticker: str, period: str = "5y") -> list[dict]:
     """返回 [{"date": "YYYY-MM-DD", "close": 数字}, ...]，取不到（网络问题/
-    代码无效）就安静返回空列表——图表那边会优雅降级成只显示点位表。"""
+    代码无效）就安静返回空列表——图表那边会优雅降级成只显示点位表。默认拉
+    5 年，配合前端"近5年/全部"两档快速筛选按钮用。"""
     import time
-    hit = _PRICE_HISTORY_CACHE.get(ticker)
+    cache_key = f"{ticker}|{period}"
+    hit = _PRICE_HISTORY_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _PRICE_HISTORY_TTL_SEC:
         return hit[1]
     out: list[dict] = []
@@ -341,7 +343,7 @@ def fetch_price_history(ticker: str, period: str = "1y") -> list[dict]:
                            "close": round(float(close), 4)})
     except Exception:
         out = []
-    _PRICE_HISTORY_CACHE[ticker] = (time.time(), out)
+    _PRICE_HISTORY_CACHE[cache_key] = (time.time(), out)
     return out
 
 

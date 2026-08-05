@@ -853,10 +853,11 @@ def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
     assert b"pointStyle" in r.data and b"dash" in r.data   # short-dash markers
     assert b"channel" in r.data and b"X" in r.data          # per-channel grouping
     assert b"#d16060" in r.data                              # palette color assigned
-    # time-range quick filters (近1月/近3月/近6月/近1年/全部) + JS to filter
-    # both the chart and the price-level table in sync
-    for label in ("近1月", "近3月", "近6月", "近1年", "全部"):
+    # time-range quick filters (近1月/近3月/近6月/近1年/近5年/全部) + JS to
+    # filter both the chart and the price-level table in sync
+    for label in ("近1月", "近3月", "近6月", "近1年", "近5年", "全部"):
         assert label.encode() in r.data
+    assert b'data-range-days="1825"' in r.data
     assert b"data-range-for=" in r.data
     assert b"applyRange" in r.data
     assert b"priceLevelTable" in r.data

@@ -3563,7 +3563,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
         f'data-range-days="{days}" style="padding:2px 10px">{label}</button>'
         for days, label, cls in [
             ("30", "近1月", ""), ("90", "近3月", ""), ("180", "近6月", ""),
-            ("365", "近1年", ""), ("all", "全部", "primary")])
+            ("365", "近1年", ""), ("1825", "近5年", ""), ("all", "全部", "primary")])
     return f"""<div class=card>
 <h3>价格走势与推荐点位（{escape(ticker)}）——短横线是视频里提到的点位，
 按频道上色，鼠标移上去看是谁说的、说了什么</h3>

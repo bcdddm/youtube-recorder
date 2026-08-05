@@ -142,6 +142,34 @@ def append_dossier_entries(vault_root: Path, company: str, *, video_id: str,
 
 # --- orchestration：一篇文章 -> 逐个未处理过的公司 ---------------------------
 
+def backfill_all(cfg, con, log=None) -> dict:
+    """手动补跑：把库里所有已经写过 wiki 笔记的历史文章都过一遍公司档案
+    抽取——用于给插件"喂"存量数据，或者抽取逻辑升级后重新跑一遍。跟
+    pipeline._trigger_company_dossier() 那个只处理"这一轮新写入"的自动
+    钩子是两回事；复用同一套 (company, video_id) 去重，不会重复处理。"""
+    rows = con.execute(
+        "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+    video_ids = [r["video_id"] for r in rows]
+    scanned = 0
+    videos_with_companies = 0
+    companies_processed = 0
+    for vid in video_ids:
+        scanned += 1
+        try:
+            n = process_video_companies(cfg, con, vid, log)
+        except Exception as e:
+            if log:
+                log.event("dossier_backfill_video_failed", video_id=vid, detail=str(e))
+            continue
+        if n:
+            videos_with_companies += 1
+            companies_processed += n
+        if log:
+            log.event("dossier_backfill_progress", video_id=vid, companies=n)
+    return {"scanned": scanned, "videos_with_companies": videos_with_companies,
+           "companies_processed": companies_processed}
+
+
 def process_video_companies(cfg, con, video_id: str, log=None) -> int:
     """处理一篇文章：找出它 companies 字段里还没抽取过的公司，逐个跑抽取
     并追加进对应的公司档案笔记，标记为已处理。返回实际处理的公司数。"""

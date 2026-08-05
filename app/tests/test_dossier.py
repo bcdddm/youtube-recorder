@@ -246,6 +246,74 @@ def test_process_video_companies_no_article_json_is_safe():
     assert dossier.process_video_companies(_CfgFlag(), con, "vid-does-not-exist") == 0
 
 
+# --- dossier.py: historical backfill ----------------------------------------
+
+def test_backfill_all_processes_every_wiki_write_once():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossier3", "https://youtube.com/@d3", "D3")
+
+    # two videos with wiki writes + article.json companies, one without
+    # article.json at all (should just be skipped, not error the whole run)
+    for i, comps in enumerate([["ASML"], ["台积电", "英伟达"]], start=1):
+        vid = f"vidBF0{i}"
+        dbm.upsert_discovered(con, vid, "UCdossier3", "标题", "2026-07-10T00:00:00Z")
+        _write_article_json(vid, comps)
+        con.execute(
+            "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+            (vid, "wiki", f"/fake/vault/30-Wiki/标题--{vid}.md", dbm.now()))
+    dbm.upsert_discovered(con, "vidBF03", "UCdossier3", "无文章", "2026-07-11T00:00:00Z")
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidBF03", "wiki", "/fake/vault/30-Wiki/无文章--vidBF03.md", dbm.now()))
+    con.commit()
+
+    root = Path(_TMP) / "vault-backfill"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        result = dossier.backfill_all(_Cfg(), con)
+    assert result["scanned"] >= 3          # at least our 3 fixture videos
+    assert result["videos_with_companies"] >= 2
+    assert result["companies_processed"] >= 3   # ASML + 台积电 + 英伟达
+
+    for name in ("ASML", "台积电", "英伟达"):
+        assert dossier.dossier_note_path(root, name).exists()
+
+    # running it again is a no-op for those same videos (already processed)
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON) as m:
+        dossier.backfill_all(_Cfg(), con)
+    m.assert_not_called()
+
+
+def test_backfill_all_skips_broken_video_without_failing_the_batch():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossier4", "https://youtube.com/@d4", "D4")
+    dbm.upsert_discovered(con, "vidBFerr", "UCdossier4", "T", "2026-07-10T00:00:00Z")
+    _write_article_json("vidBFerr", ["ASML"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidBFerr", "wiki", "/fake/vault/30-Wiki/T--vidBFerr.md", dbm.now()))
+    con.commit()
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            raise RuntimeError("boom")   # simulate a broken lookup for this video
+
+    result = dossier.backfill_all(_Cfg(), con)   # must not raise
+    assert result["scanned"] >= 1
+
+
 # --- gui.py: /companies list + detail routes --------------------------------
 
 def test_companies_routes():

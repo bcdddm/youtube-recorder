@@ -8,6 +8,7 @@ Commands (v0.2 design §13.3):
   ytrec inspect VIDEO_ID          full record: video, artifacts, attempts
   ytrec retry VIDEO_ID --from STAGE
   ytrec run --once                one pipeline pass (discovery lands in P3)
+  ytrec dossier-backfill           补跑公司档案插件：过一遍历史文章
 """
 
 from __future__ import annotations
@@ -136,6 +137,19 @@ def cmd_retry(args) -> int:
     return 0
 
 
+def cmd_dossier_backfill(args) -> int:
+    log = RunLogger()
+    cfg = cfg_mod.load()
+    con = dbm.connect()
+    from . import dossier
+    result = dossier.backfill_all(cfg, con, log)
+    _p(f"dossier backfill: scanned={result['scanned']} "
+       f"videos_with_companies={result['videos_with_companies']} "
+       f"companies_processed={result['companies_processed']}")
+    con.close()
+    return 0
+
+
 def cmd_run(args) -> int:
     log = RunLogger()
     try:
@@ -219,6 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.set_defaults(fn=lambda a: __import__(
         "youtube_recorder.gui", fromlist=["main"]).main(
         port=a.port, open_browser=not a.no_browser) or 0)
+
+    dbf = sub.add_parser(
+        "dossier-backfill",
+        help="补跑公司档案插件：把库里已有的全部历史文章过一遍增量抽取")
+    dbf.set_defaults(fn=cmd_dossier_backfill)
 
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")

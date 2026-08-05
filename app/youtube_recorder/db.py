@@ -13,7 +13,7 @@ from pathlib import Path
 from .paths import DB_FILE
 from . import state as st
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -136,6 +136,25 @@ CREATE TABLE IF NOT EXISTS dossier_price_levels (
 );
 CREATE INDEX IF NOT EXISTS idx_dossier_price_levels_company
     ON dossier_price_levels(company);
+CREATE TABLE IF NOT EXISTS dossier_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    company TEXT NOT NULL,          -- canonical name
+    video_id TEXT NOT NULL,
+    channel TEXT,
+    mentioned_date TEXT,            -- 视频发布日期 YYYY-MM-DD
+    kind TEXT NOT NULL,             -- observation | concern
+    text TEXT NOT NULL,
+    source_link TEXT,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dossier_observations_company
+    ON dossier_observations(company, mentioned_date DESC);
+CREATE TABLE IF NOT EXISTS dossier_summaries (
+    company TEXT PRIMARY KEY,       -- canonical name
+    summary TEXT NOT NULL,
+    item_count INTEGER NOT NULL DEFAULT 0,   -- 汇总用了多少篇文章
+    generated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_attempts_video ON attempts(video_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_writes_video ON writes(video_id, note_kind);
 CREATE INDEX IF NOT EXISTS idx_writes_notekind_at ON writes(note_kind, at);
@@ -575,3 +594,54 @@ def dossier_delete_price_level(con, level_id: int, company: str) -> bool:
         (level_id, company))
     con.commit()
     return cur.rowcount > 0
+
+
+# --- dossier_observations：结构化观点评价/关注点（AI 近期总结用） -----------
+
+def dossier_add_observation(con, *, company: str, video_id: str, channel: str | None,
+                            mentioned_date: str | None, kind: str, text: str,
+                            source_link: str | None) -> None:
+    con.execute(
+        "INSERT INTO dossier_observations(company, video_id, channel, mentioned_date, "
+        "kind, text, source_link, at) VALUES (?,?,?,?,?,?,?,?)",
+        (company, video_id, channel, mentioned_date, kind, text, source_link, now()))
+    con.commit()
+
+
+def dossier_observations_for_company(con, company: str,
+                                     since: str | None = None,
+                                     limit_videos: int = 10) -> list[sqlite3.Row]:
+    """给"AI 近期总结"用的取数：最近 since（含）以后的记录，但只取最近
+    limit_videos 篇不同视频里的内容——三个月和十篇哪个覆盖的视频更少，就是
+    哪个在起作用（since 定死一个日期下限，limit_videos 顶住条数上限，两个
+    一起卡住之后结果自然是二者中覆盖视频数更少的那个）。按视频发布日期
+    倒序（最新的在前），同一视频内按 id 顺序。"""
+    q = "SELECT DISTINCT video_id, mentioned_date FROM dossier_observations WHERE company=?"
+    args: list = [company]
+    if since:
+        q += " AND mentioned_date>=?"
+        args.append(since)
+    q += " ORDER BY mentioned_date DESC, video_id DESC LIMIT ?"
+    args.append(limit_videos)
+    vids = [r["video_id"] for r in con.execute(q, args)]
+    if not vids:
+        return []
+    qmarks = ",".join("?" * len(vids))
+    return con.execute(
+        f"SELECT * FROM dossier_observations WHERE company=? AND video_id IN ({qmarks}) "
+        f"ORDER BY mentioned_date ASC, id ASC", [company, *vids]).fetchall()
+
+
+def dossier_get_summary(con, company: str) -> sqlite3.Row | None:
+    return con.execute(
+        "SELECT * FROM dossier_summaries WHERE company=?", (company,)).fetchone()
+
+
+def dossier_set_summary(con, company: str, summary: str, item_count: int) -> None:
+    con.execute(
+        "INSERT INTO dossier_summaries(company, summary, item_count, generated_at) "
+        "VALUES (?,?,?,?) ON CONFLICT(company) DO UPDATE SET "
+        "summary=excluded.summary, item_count=excluded.item_count, "
+        "generated_at=excluded.generated_at",
+        (company, summary, item_count, now()))
+    con.commit()

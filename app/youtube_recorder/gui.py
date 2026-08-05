@@ -3460,6 +3460,8 @@ def company_view(name: str):
     raw_levels = dbm.dossier_price_levels_for(con, name)
     ticker = _dossier.resolve_ticker(cfg, con, name)
     history = _dossier.fetch_price_history(ticker) if ticker else []
+    summary_row = dbm.dossier_get_summary(con, name)
+    pinned = bool(ent["pinned"]) if ent is not None else False
     con.close()
 
     reference = history[-1]["close"] if history else None
@@ -3494,14 +3496,59 @@ def company_view(name: str):
             f"<tr><th></th><th>日期</th><th>频道</th><th>类型</th><th>价格</th><th>原文</th></tr>"
             f"{lrows}</table></div>")
 
+    summary_html = _dossier_summary_html(name, summary_row, pinned)
+
     body = f"""<div class=card style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
 <a class=dim href='/companies'>← 返回公司列表</a>
 <a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
+{summary_html}
 {chart_html}
 {outlier_note}
 {levels_html}
 <div class=card><div class=md>{html}</div></div>"""
     return page(name, "companies", body)
+
+
+def _dossier_summary_html(name: str, summary_row, pinned: bool) -> str:
+    """AI 近期总结卡片：置顶公司有新内容会自动刷新（见 dossier.
+    process_video_companies），非置顶公司只能靠这里的手动刷新按钮生成/
+    更新。不管哪种，生成时间都写在总结旁边，方便判断是不是最新的。"""
+    refresh_form = (
+        f'<form method=post action="/companies/{escape(name)}/summary/refresh" '
+        f'style="display:inline">'
+        f'<input type=hidden name=_csrf value="{CSRF}">'
+        f'<button style="padding:2px 10px">'
+        f'{"🔄 立即刷新" if summary_row else "✨ 生成 AI 近期总结"}</button></form>')
+    pin_note = ('<span class=dim style="font-size:.85em">'
+               '（置顶公司，有新内容会自动刷新）</span>' if pinned else
+               '<span class=dim style="font-size:.85em">（非置顶，需手动刷新）</span>')
+    if summary_row is None:
+        return (f'<div class=card><h3>AI 近期总结</h3>'
+               f'<div class=dim>还没有生成过，最近三个月内（或最新 10 篇，哪个更少'
+               f'算哪个）有相关内容时可以点这里生成。</div>'
+               f'<div style="margin-top:6px">{refresh_form} {pin_note}</div></div>')
+    generated = (summary_row["generated_at"] or "").replace("T", " ").rstrip("Z")
+    return (f'<div class=card><h3>AI 近期总结</h3>'
+           f"<pre style='white-space:pre-wrap;font-family:inherit;font-size:15.5px;"
+           f"line-height:1.75;margin:0'>{escape(summary_row['summary'])}</pre>"
+           f'<div class=dim style="margin-top:8px;font-size:.85em">'
+           f'生成于 {escape(generated)} UTC · 覆盖 {summary_row["item_count"]} 条内容'
+           f'</div>'
+           f'<div style="margin-top:6px">{refresh_form} {pin_note}</div></div>')
+
+
+@app.route("/companies/<name>/summary/refresh", methods=["POST"])
+def company_summary_refresh(name: str):
+    check_csrf()
+    cfg = cfg_mod.load()
+    from . import dossier as _dossier
+    con = dbm.connect()
+    try:
+        _dossier.generate_dossier_summary(cfg, con, name)
+    except Exception:
+        pass
+    con.close()
+    return redirect(url_for("company_view", name=name))
 
 
 @app.route("/companies/<name>/price-level/delete", methods=["POST"])

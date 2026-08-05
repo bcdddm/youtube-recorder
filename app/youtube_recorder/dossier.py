@@ -184,10 +184,17 @@ def append_dossier_entries(vault_root: Path, company: str, *, video_id: str,
     date = (published or db_now())[:10]
     txt = re.sub(r"(?m)^updated: .*$", f"updated: {db_now()[:10]}", txt, count=1)
     chan_prefix = f"{channel} · " if channel else ""
+    obs_kind = {"observations": "observation", "concerns": "concern"}
     for key in ("observations", "concerns"):
         for item in points.get(key) or []:
             line = f"- [{date}] {item}（来源：{chan_prefix}{source_link}）"
             txt = _append_under_heading(txt, SECTION_TITLES[key], line)
+            if con is not None:
+                from . import db as dbm
+                dbm.dossier_add_observation(
+                    con, company=company, video_id=video_id, channel=channel,
+                    mentioned_date=date, kind=obs_kind[key], text=item,
+                    source_link=source_link)
     for lvl in points.get("price_levels") or []:
         text = lvl.get("text") if isinstance(lvl, dict) else str(lvl)
         if not text:
@@ -347,6 +354,79 @@ def fetch_price_history(ticker: str, period: str = "5y") -> list[dict]:
     return out
 
 
+SUMMARY_SYSTEM = """你是投资研究助理。给你某家公司/实体最近一段时间、按时间从旧到新
+排列的多篇财经视频里提到的观点评价、关注点、推荐点位（每条都标了发布日期和来源频道）。
+帮我写一份"近期总结"，汇总各路主播/分析师对这家公司的看法，给我参考。
+
+写作要求：
+- 只能围绕这家公司本身，不要延伸去总结大盘走势或者其他公司
+- 时间越新的内容权重越高，要重点体现在总结里；时间越久远的内容只需要一笔
+  带过（提一下当时的背景/看法），不要展开细节——总结应该读起来像是"最新
+  情况是这样，此前大家怎么看"，而不是不分时间地平铺直叙
+- 不同来源如果观点有分歧或矛盾，直接指出来（比如"A频道认为...，但B频道
+  觉得..."），不要含糊带过、不要强行统一成一个结论
+- 提到具体点位/数字时保留原始数字，不要模糊化
+- 写成 100~250 字左右的中文自然语言段落（可以分两段），不要用列表、
+  不要加标题
+- 只输出总结正文，不要引号、不要任何其他说明文字
+"""
+
+
+def generate_dossier_summary(cfg, con, company: str) -> dict | None:
+    """生成/刷新某家公司的"AI 近期总结"：取最近三个月以内、最多 10 篇视频
+    的观点评价/关注点/推荐点位（三个月和十篇哪个覆盖视频数更少就用哪个，
+    见 db.dossier_observations_for_company），按时间从旧到新拼给 AI，
+    汇总各家看法，写进 dossier_summaries。没有可用内容就返回 None（不产生
+    空总结、不覆盖已有的旧总结）。"""
+    from . import db as dbm
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    obs_rows = dbm.dossier_observations_for_company(con, company, since=cutoff,
+                                                     limit_videos=10)
+    if not obs_rows:
+        return None
+    video_ids = {r["video_id"] for r in obs_rows}
+    price_rows = [r for r in dbm.dossier_price_levels_for(con, company)
+                 if r["video_id"] in video_ids]
+
+    by_video: dict[str, dict] = {}
+    order: list[str] = []
+    for r in obs_rows:
+        vid = r["video_id"]
+        if vid not in by_video:
+            by_video[vid] = {"date": r["mentioned_date"] or "",
+                             "channel": r["channel"] or "未知频道", "items": []}
+            order.append(vid)
+        label = "观点" if r["kind"] == "observation" else "关注点"
+        by_video[vid]["items"].append(f"[{label}] {r['text']}")
+    for r in price_rows:
+        vid = r["video_id"]
+        if vid not in by_video:
+            continue
+        price_txt = f"（{r['price']}）" if r["price"] is not None else ""
+        by_video[vid]["items"].append(
+            f"[{LEVEL_TYPE_LABELS.get(r['level_type'], '点位')}{price_txt}] {r['raw_text']}")
+    order.sort(key=lambda v: (by_video[v]["date"], v))
+
+    blocks = []
+    for vid in order:
+        v = by_video[vid]
+        items_text = "\n".join(f"  - {i}" for i in v["items"])
+        blocks.append(f"{v['date']}（{v['channel']}）：\n{items_text}")
+    user = f"公司/实体：{company}\n\n" + "\n\n".join(blocks)
+
+    try:
+        reply = providers.complete(cfg, con, "dossier_summary", SUMMARY_SYSTEM, user,
+                                   max_tokens=800, purpose="dossier")
+    except Exception:
+        return None
+    summary = (reply or "").strip().strip('"').strip()
+    if not summary:
+        return None
+    dbm.dossier_set_summary(con, company, summary, len(order))
+    return {"summary": summary, "item_count": len(order)}
+
+
 def filter_price_level_outliers(levels, reference: float | None):
     """按参考价格（通常是最新收盘价，没有收盘价就退回点位自身的中位数）
     过滤掉明显跑偏的点位——价格是参考价 20 倍以上、或者不到参考价的
@@ -504,4 +584,15 @@ def process_video_companies(cfg, con, video_id: str, log=None) -> int:
         done += 1
         if log:
             log.event("dossier_processed", video_id=video_id, company=company)
+        # 置顶公司（比如自己持有的）：有新内容进来就自动刷新 AI 近期总结；
+        # 非置顶的公司留给用户在页面上手动点刷新，省得每篇新文章都触发一次
+        # AI 调用。总结生成失败（AI 报错等）不该打断抽取主流程，安静跳过。
+        ent = dbm.dossier_get_entity(con, company)
+        if ent is not None and ent["pinned"]:
+            try:
+                generate_dossier_summary(cfg, con, company)
+            except Exception as e:
+                if log:
+                    log.event("dossier_summary_autogen_failed", company=company,
+                             detail=str(e))
     return done

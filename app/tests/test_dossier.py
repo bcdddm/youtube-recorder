@@ -988,6 +988,240 @@ def test_company_price_level_delete_removes_row():
     assert remaining == []
 
 
+def test_observations_for_company_uses_3mo_or_10_videos_whichever_fewer():
+    from datetime import datetime, timedelta, timezone
+    con = dbm.connect()
+    today = datetime.now(timezone.utc)
+
+    def _d(days_ago):
+        return (today - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+    # 12 videos within the last 3 months -> should cap at the most recent 10
+    for i in range(12):
+        dbm.dossier_add_observation(
+            con, company="观测窗口测试甲", video_id=f"win_recent_{i}",
+            channel="X", mentioned_date=_d(i * 5), kind="observation",
+            text=f"观点{i}", source_link="[[n]]")
+    # one video from 200 days ago (outside the 3-month/90-day window)
+    dbm.dossier_add_observation(
+        con, company="观测窗口测试甲", video_id="win_old",
+        channel="X", mentioned_date=_d(200), kind="observation",
+        text="很久以前的观点", source_link="[[n]]")
+
+    cutoff = (today - timedelta(days=90)).strftime("%Y-%m-%d")
+    rows = dbm.dossier_observations_for_company(con, "观测窗口测试甲",
+                                                 since=cutoff, limit_videos=10)
+    vids = {r["video_id"] for r in rows}
+    assert len(vids) == 10                    # capped at 10, not 12
+    assert "win_old" not in vids              # outside the 3-month window
+    assert "win_recent_0" in vids             # most recent ones kept
+
+    # only 3 videos in the window -> naturally fewer than 10, all kept
+    for i in range(3):
+        dbm.dossier_add_observation(
+            con, company="观测窗口测试乙", video_id=f"win_few_{i}",
+            channel="Y", mentioned_date=_d(i * 10), kind="concern",
+            text=f"关注点{i}", source_link="[[n]]")
+    rows2 = dbm.dossier_observations_for_company(con, "观测窗口测试乙",
+                                                  since=cutoff, limit_videos=10)
+    assert {r["video_id"] for r in rows2} == {"win_few_0", "win_few_1", "win_few_2"}
+
+
+def test_generate_dossier_summary_writes_to_db_and_weights_recency():
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        Path(_TMP) / "vault-summary1", "总结测试公司", video_id="sum1",
+        published="2026-08-01T00:00:00Z", channel="频道甲", source_link="[[n1]]",
+        points={"observations": ["最新一期看多"], "concerns": [],
+               "price_levels": []}, con=con)
+    dossier.append_dossier_entries(
+        Path(_TMP) / "vault-summary1", "总结测试公司", video_id="sum2",
+        published="2026-07-01T00:00:00Z", channel="频道乙", source_link="[[n2]]",
+        points={"observations": [], "concerns": ["一个月前提过的风险"],
+               "price_levels": [{"text": "200 支撑", "price": 200,
+                                 "level_type": "support"}]}, con=con)
+
+    with mock.patch.object(providers, "complete",
+                           return_value="总结正文：近期偏多，此前有风险提示。") as m:
+        result = dossier.generate_dossier_summary(
+            _CfgFlag(True), con, "总结测试公司")
+    assert result is not None
+    assert result["item_count"] == 2
+    assert "总结正文" in result["summary"]
+    # the AI call actually received both videos' content, oldest first
+    user_arg = m.call_args.args[4]
+    assert user_arg.index("最新一期看多") > user_arg.index("一个月前提过的风险")
+
+    row = dbm.dossier_get_summary(con, "总结测试公司")
+    assert row is not None
+    assert row["summary"] == result["summary"]
+    assert row["item_count"] == 2
+    assert row["generated_at"]
+
+
+def test_generate_dossier_summary_returns_none_without_recent_data():
+    con = dbm.connect()
+    with mock.patch.object(providers, "complete") as m:
+        result = dossier.generate_dossier_summary(
+            _CfgFlag(True), con, "从没被提到过的测试公司")
+    assert result is None
+    m.assert_not_called()
+    assert dbm.dossier_get_summary(con, "从没被提到过的测试公司") is None
+
+
+def test_pinned_company_auto_regenerates_summary_on_new_content():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossierPin1", "https://youtube.com/@dp1", "DP1")
+    dbm.upsert_discovered(con, "vidPinAuto1", "UCdossierPin1", "标题",
+                          "2026-07-10T00:00:00Z")
+    _write_article_json("vidPinAuto1", ["置顶自动总结测试公司"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidPinAuto1", "wiki", "/fake/vault/30-Wiki/标题--vidPinAuto1.md", dbm.now()))
+    con.commit()
+    dbm.dossier_register_entity(con, "置顶自动总结测试公司", status="approved")
+    dbm.dossier_set_pinned(con, "置顶自动总结测试公司", True)
+
+    root = Path(_TMP) / "vault-pin-summary"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    def _side_effect(cfg, con_, video_id, system, user, max_tokens=8000,
+                     purpose="article"):
+        if system == dossier.SUMMARY_SYSTEM:
+            return "自动生成的置顶公司总结"
+        return FAKE_JSON
+
+    with mock.patch.object(providers, "complete", side_effect=_side_effect):
+        n = dossier.process_video_companies(_Cfg(), con, "vidPinAuto1")
+    assert n == 1
+    row = dbm.dossier_get_summary(con, "置顶自动总结测试公司")
+    assert row is not None
+    assert row["summary"] == "自动生成的置顶公司总结"
+
+
+def test_company_view_shows_generate_prompt_when_no_summary_yet():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-summary-none"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "总结卡片测试公司甲", video_id="sc1", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["观点"], "concerns": [], "price_levels": []},
+        con=con)
+
+    with mock.patch.object(dossier, "resolve_ticker", return_value=None):
+        r = client.get("/companies/总结卡片测试公司甲")
+    assert r.status_code == 200
+    assert "AI 近期总结".encode() in r.data
+    assert "✨ 生成 AI 近期总结".encode() in r.data
+    assert "（非置顶，需手动刷新）".encode() in r.data
+    assert b'action="/companies/' in r.data
+    assert b"summary/refresh" in r.data
+
+
+def test_company_view_shows_summary_text_and_generated_timestamp():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-summary-shown"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "总结卡片测试公司乙", video_id="sc2", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["观点"], "concerns": [], "price_levels": []},
+        con=con)
+    dbm.dossier_set_pinned(con, "总结卡片测试公司乙", True)
+    dbm.dossier_set_summary(con, "总结卡片测试公司乙", "这是测试用的总结正文", 3)
+
+    with mock.patch.object(dossier, "resolve_ticker", return_value=None):
+        r = client.get("/companies/总结卡片测试公司乙")
+    assert r.status_code == 200
+    assert "这是测试用的总结正文".encode() in r.data
+    assert "生成于".encode() in r.data
+    assert "覆盖 3 条内容".encode() in r.data
+    assert "🔄 立即刷新".encode() in r.data
+    assert "（置顶公司，有新内容会自动刷新）".encode() in r.data
+
+
+def test_company_summary_refresh_route_regenerates_and_redirects():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-summary-refresh"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "总结刷新测试公司", video_id="sc3", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["观点"], "concerns": [], "price_levels": []},
+        con=con)
+    assert dbm.dossier_get_summary(con, "总结刷新测试公司") is None
+
+    with mock.patch.object(providers, "complete", return_value="刚刷新出来的总结"):
+        r = client.post("/companies/总结刷新测试公司/summary/refresh",
+                        data={"_csrf": gui.CSRF}, follow_redirects=False)
+    assert r.status_code in (301, 302, 303, 307, 308)
+    from urllib.parse import unquote
+    assert unquote(r.headers["Location"]).endswith("/companies/总结刷新测试公司")
+
+    row = dbm.dossier_get_summary(con, "总结刷新测试公司")
+    assert row is not None
+    assert row["summary"] == "刚刷新出来的总结"
+
+
+def test_non_pinned_company_does_not_auto_generate_summary():
+    con = dbm.connect()
+    dbm.add_channel(con, "UCdossierPin2", "https://youtube.com/@dp2", "DP2")
+    dbm.upsert_discovered(con, "vidPinAuto2", "UCdossierPin2", "标题",
+                          "2026-07-10T00:00:00Z")
+    _write_article_json("vidPinAuto2", ["非置顶自动总结测试公司"])
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        ("vidPinAuto2", "wiki", "/fake/vault/30-Wiki/标题--vidPinAuto2.md", dbm.now()))
+    con.commit()
+
+    root = Path(_TMP) / "vault-nonpin-summary"
+
+    class _Cfg:
+        def get(self, k, d=None):
+            return d
+
+        @property
+        def vault_root(self):
+            return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        n = dossier.process_video_companies(_Cfg(), con, "vidPinAuto2")
+    assert n == 1
+    assert dbm.dossier_get_summary(con, "非置顶自动总结测试公司") is None
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

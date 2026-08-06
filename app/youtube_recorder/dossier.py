@@ -879,6 +879,116 @@ def backfill_all(cfg, con, log=None) -> dict:
            "companies_processed": companies_processed}
 
 
+# ── 指数/ETF 提及扫描 ─────────────────────────────────────────────────
+# 问题：article.json 的 companies 字段是 AI 在写文章时顺手标的"文章提到
+# 的公司"，抽取 prompt（article.py COMPOSE_SYSTEM）举的例子都是具体公司
+# （英伟达/TSLA/鲍威尔），没有强调过指数/ETF，所以历史上很多篇明明提到
+# "标普500""纳指""费城半导体"的文章，companies 字段里根本没写这些名字
+# ——process_video_companies() 只处理 companies 字段里有的名字，这些提及
+# 就被漏掉了，指数页面因此一直是空的。
+#
+# 解决办法分两半：
+# 1) 这里：正则扫一遍所有历史文章正文，命中就当场跑一次抽取（复用
+#    extract_company_points，跟正常流程一模一样，就是不依赖 companies
+#    字段触发）——这一步要花真的 AI 调用，跟"零 AI 成本"的笔记回填
+#    不是一回事，但没有更省的办法：文章里具体说了什么、值不值得记一条，
+#    只有让 AI 读一遍正文才能判断。
+# 2) article.py 那边加了指数/ETF 的例子到 companies 抽取 prompt 里，
+#    以后新文章会自己把这些标进 companies 字段，不用再靠这里的正则扫。
+def _word(token: str) -> str:
+    """给一个纯 ASCII 代码词（NDX/QQQ 之类）套上"前后不是字母数字"的边界。
+    不用 \\b：Python re 把 CJK 字符也算进 \\w，"到QQQ的"这种中文夹着的写法
+    \\b 反而不触发（两边都是 \\w，没有边界），得手写 lookaround 才行。"""
+    return rf"(?<![A-Za-z0-9]){token}(?![A-Za-z0-9])"
+
+
+INDEX_ALIASES: dict[str, list[str]] = {
+    "标普500": [r"标普\s*500", r"标普500指数", r"S&P\s*500", _word("SPX"),
+              r"\^GSPC"],
+    "纳斯达克100": [r"纳斯达克\s*100", r"纳指\s*100", r"纳斯达克指数",
+                r"纳指(?!\d)", r"Nasdaq\s*100", _word("NDX"), _word("QQQ")],
+    "SOXX": [r"费城半导体", r"半导体指数", _word("SOX(?!L)"), _word("SOXX")],
+    "IGV": [_word("IGV"), r"软件行业\s*ETF", r"软件\s*ETF"],
+}
+_INDEX_ALIAS_RE = {name: re.compile("|".join(pats), re.I)
+                   for name, pats in INDEX_ALIASES.items()}
+
+
+def scan_video_for_index_mentions(cfg, con, video_id: str, log=None) -> int:
+    """对一篇文章：正则命中的每个指数/ETF（还没为这篇文章跑过的）都单独
+    抽一次，追加进对应指数的档案笔记。返回新处理的指数数。用法跟
+    process_video_companies 一致，是它的补充，不是替代——那边继续负责
+    companies 字段里的普通公司，这里专门兜底指数/ETF 这一类。"""
+    from .paths import work_dir
+    from . import db as dbm
+    aj = work_dir(video_id) / "article.json"
+    if not aj.exists():
+        return 0
+    try:
+        art = json.loads(aj.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    text = article_plain_text(art)
+    if not text:
+        return 0
+    matched = [name for name, pat in _INDEX_ALIAS_RE.items() if pat.search(text)]
+    if not matched:
+        return 0
+    todo = dbm.dossier_unprocessed(con, video_id, matched)
+    if not todo:
+        return 0
+    vault_root = cfg.vault_root
+    if not vault_root:
+        return 0
+    row = con.execute(
+        "SELECT note_path FROM writes WHERE video_id=? AND note_kind='wiki' "
+        "ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
+    if not row:
+        return 0
+    source_link = f"[[{Path(row['note_path']).stem}]]"
+    video_row = con.execute(
+        "SELECT published_at FROM videos WHERE video_id=?", (video_id,)).fetchone()
+    published = video_row["published_at"] if video_row else ""
+    channel = channel_name_for_video(con, video_id)
+    done = 0
+    for name in todo:
+        points = extract_company_points(cfg, con, video_id, name, text)
+        append_dossier_entries(vault_root, name, video_id=video_id,
+                               published=published, channel=channel,
+                               source_link=source_link, points=points, con=con)
+        dbm.dossier_mark_processed(con, video_id, name)
+        done += 1
+        if log:
+            log.event("dossier_index_scan_processed", video_id=video_id, index=name)
+    return done
+
+
+def backfill_index_mentions(cfg, con, log=None) -> dict:
+    """全库扫一遍：找出所有提到过标普500/纳斯达克100/SOXX/IGV这几个指数/
+    ETF、但从没为这篇文章单独抽取过的历史文章，逐篇补跑。幂等——已经
+    处理过的 (指数, video_id) 组合会被 dossier_unprocessed 自动跳过，
+    可以放心重复执行。"""
+    rows = con.execute(
+        "SELECT DISTINCT video_id FROM writes WHERE note_kind='wiki'").fetchall()
+    scanned = 0
+    videos_matched = 0
+    entries_added = 0
+    for r in rows:
+        scanned += 1
+        try:
+            n = scan_video_for_index_mentions(cfg, con, r["video_id"], log)
+        except Exception as e:
+            if log:
+                log.event("dossier_index_backfill_failed",
+                         video_id=r["video_id"], detail=str(e))
+            continue
+        if n:
+            videos_matched += 1
+            entries_added += n
+    return {"scanned": scanned, "videos_matched": videos_matched,
+           "entries_added": entries_added}
+
+
 def process_video_companies(cfg, con, video_id: str, log=None) -> int:
     """处理一篇文章：解析它 companies 字段里每个原始名字对应的 canonical
     实体（新名字自动以 pending 状态登记，见 db.dossier_resolve_entity），

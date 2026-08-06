@@ -3533,6 +3533,31 @@ def company_view(name: str):
     return page(name, "companies", body)
 
 
+# 三个图表（价格走势图、市盈率历史图、指数基准图）共用的十字光标插件：
+# 鼠标悬停在图上时画一条竖线（对准悬停的数据点）和一条横线（对准同一个
+# 点的 y 值），横竖交叉正对着当前悬停的点，方便对着坐标轴读数值，而不用
+# 只靠 tooltip 文字。用 Chart.js 的插件机制（每张图各自的 IIFE 里都定义
+# 一份，图表互相独立，一个图表的脚本出错不连累另一个）。
+_CROSSHAIR_JS = """
+  var crosshairPlugin = {
+    id: "crosshair",
+    afterDraw: function(chart){
+      var active = chart.tooltip && chart.tooltip._active;
+      if (!active || !active.length) return;
+      var el = active[0].element, area = chart.chartArea, ctx = chart.ctx;
+      ctx.save();
+      ctx.beginPath();
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(233,233,236,0.4)";
+      ctx.moveTo(el.x, area.top); ctx.lineTo(el.x, area.bottom);
+      ctx.moveTo(area.left, el.y); ctx.lineTo(area.right, el.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+"""
+
 _BENCH_COMPARE = ["^GSPC", "^NDX", "SOXX"]
 
 
@@ -3621,6 +3646,7 @@ def _dossier_benchmark_chart_html(ticker: str, bench: dict) -> str:
 (function(){{
   var el = document.getElementById("{cid}");
   if (!el || typeof Chart === "undefined") return;
+{_CROSSHAIR_JS}
   var d = JSON.parse(el.dataset.bench);
   var ds = [{{label: "动态市盈率", data: d.fwd, borderColor: "#e0a458",
              pointRadius: 0, borderWidth: 1.6, tension: 0.1}}];
@@ -3632,6 +3658,7 @@ def _dossier_benchmark_chart_html(ticker: str, bench: dict) -> str:
   }}
   new Chart(el, {{
     type: "line", data: {{labels: d.labels, datasets: ds}},
+    plugins: [crosshairPlugin],
     options: {{responsive: true,
       interaction: {{mode: "nearest", intersect: false}},
       plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
@@ -3672,6 +3699,7 @@ EPS 按最近一个已公布财年计，所以线在财年交界处会有台阶�
 (function(){{
   var el = document.getElementById("{cid}");
   if (!el || typeof Chart === "undefined") return;
+{_CROSSHAIR_JS}
   var d = JSON.parse(el.dataset.pe);
   var ds = [
     {{label: "静态市盈率", data: d.pe, borderColor: "#9ece6a",
@@ -3687,6 +3715,7 @@ EPS 按最近一个已公布财年计，所以线在财年交界处会有台阶�
   }}
   new Chart(el, {{
     type: "line", data: {{labels: d.labels, datasets: ds}},
+    plugins: [crosshairPlugin],
     options: {{
       responsive: true,
       interaction: {{mode: "nearest", intersect: false}},
@@ -3902,6 +3931,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
 (function(){{
   var el = document.getElementById("{cid}");
   var d = JSON.parse(el.dataset.chart);
+{_CROSSHAIR_JS}
   var CSRF_TOK = {_json.dumps(CSRF)};
   var DELETE_URL = {_json.dumps(f"/companies/{name}/price-level/delete")};
 
@@ -4017,6 +4047,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
   var chart = new Chart(el, {{
     type: "line",
     data: {{labels: d.labels, datasets: buildDatasets(d.labels, idxOfLabels(d.labels))}},
+    plugins: [crosshairPlugin],
     options: {{
       responsive: true,
       interaction: {{mode: "nearest", intersect: false}},

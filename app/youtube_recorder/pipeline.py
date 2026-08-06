@@ -576,7 +576,12 @@ def _trigger_auto_digest(stats: RunStats, log) -> None:
 def _trigger_company_dossier(con, cfg, stats: RunStats, log) -> None:
     """公司档案插件（默认关闭，dossier.enabled）：本轮新写入 vault 的每篇
     文章，检查它 companies 字段里还没处理过的公司，逐个跑一次增量抽取，
-    追加进对应公司的档案笔记。独立成函数便于单测。"""
+    追加进对应公司的档案笔记。独立成函数便于单测。
+
+    同时兜底扫一遍指数/ETF 提及（scan_video_for_index_mentions）——这层
+    不依赖 companies 字段，靠固定的别名正则命中标普500/纳斯达克100/
+    SOXX/IGV 这几个已登记的指数实体，哪怕某篇文章的 companies 字段没把
+    它们标进去（AI 标注难免有漏），只要正文里提到了就不会漏掉。"""
     if not stats.vault_written_ids or not cfg.get("dossier.enabled", False):
         return
     from . import dossier as _dossier
@@ -587,3 +592,9 @@ def _trigger_company_dossier(con, cfg, stats: RunStats, log) -> None:
                 log.event("dossier_video_processed", video_id=vid, companies=n)
         except Exception as e:
             log.event("dossier_hook_failed", video_id=vid, detail=str(e))
+        try:
+            m = _dossier.scan_video_for_index_mentions(cfg, con, vid, log)
+            if m:
+                log.event("dossier_index_scan_hooked", video_id=vid, indexes=m)
+        except Exception as e:
+            log.event("dossier_index_scan_hook_failed", video_id=vid, detail=str(e))

@@ -469,6 +469,141 @@ def test_process_video_companies_no_article_json_is_safe():
     assert dossier.process_video_companies(_CfgFlag(), con, "vid-does-not-exist") == 0
 
 
+# --- 指数/ETF 提及扫描：兜底 companies 字段没标出来的历史提及 ---------------
+
+def _write_article_with_body(video_id, body, companies=None):
+    d = work_dir(video_id)
+    art = {"title_zh": "标题", "summary": "摘要内容",
+          "companies": companies or [],
+          "sections": [{"heading": "要点", "body": body}]}
+    (d / "article.json").write_text(json.dumps(art, ensure_ascii=False), encoding="utf-8")
+
+
+def test_index_alias_regex_matches_common_phrasings():
+    cases = {
+        "标普500": ["标普500", "标普 500 指数", "S&P 500", "SPX"],
+        "纳斯达克100": ["纳斯达克100", "纳指100", "纳指", "Nasdaq 100", "QQQ"],
+        "SOXX": ["费城半导体", "半导体指数", "SOX", "SOXX"],
+        "IGV": ["IGV", "软件行业ETF", "软件ETF"],
+    }
+    for canonical, phrases in cases.items():
+        pat = dossier._INDEX_ALIAS_RE[canonical]
+        for phrase in phrases:
+            assert pat.search(f"主播提到{phrase}的走势"), (canonical, phrase)
+    # 不该乱匹配：SOXL 是杠杆 ETF，不是 SOX/SOXX 本身
+    assert not dossier._INDEX_ALIAS_RE["SOXX"].search("买了点SOXL加杠杆")
+
+
+def _mk_video(con, vid, chan_uc="UCidx1"):
+    dbm.add_channel(con, chan_uc, f"https://youtube.com/@{chan_uc}", "指数频道")
+    dbm.upsert_discovered(con, vid, chan_uc, "标题", "2026-07-10T00:00:00Z")
+    con.execute(
+        "INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+        (vid, "wiki", f"/fake/vault/30-Wiki/标题--{vid}.md", dbm.now()))
+    con.commit()
+
+
+def test_scan_video_for_index_mentions_finds_uncredited_mention():
+    """核心场景：companies 字段没标"标普500"，但正文里明明提到了，
+    应该照样被抽取补上。"""
+    con = dbm.connect()
+    _mk_video(con, "vidIdx1")
+    _write_article_with_body(
+        "vidIdx1", "主播认为标普500短期有回调风险，重点还是看权重股。",
+        companies=[])                       # 故意不标进 companies
+    root = Path(_TMP) / "vault-idxscan"
+
+    class _Cfg:
+        def get(self, k, d=None): return d
+        @property
+        def vault_root(self): return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        n = dossier.scan_video_for_index_mentions(_Cfg(), con, "vidIdx1")
+    assert n == 1
+    p = dossier.dossier_note_path(root, "标普500")
+    assert p.exists()
+    assert "管理层对下半年订单展望乐观" in p.read_text(encoding="utf-8")
+
+    # 幂等：再跑一次不会重复处理
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON) as m:
+        n2 = dossier.scan_video_for_index_mentions(_Cfg(), con, "vidIdx1")
+    assert n2 == 0
+    m.assert_not_called()
+
+
+def test_scan_video_for_index_mentions_multiple_indexes_in_one_video():
+    con = dbm.connect()
+    _mk_video(con, "vidIdx2")
+    _write_article_with_body(
+        "vidIdx2", "今天聊聊标普500和纳斯达克100这两个指数的分歧，"
+                  "顺带提一句费城半导体最近的走势。")
+    root = Path(_TMP) / "vault-idxscan2"
+
+    class _Cfg:
+        def get(self, k, d=None): return d
+        @property
+        def vault_root(self): return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        n = dossier.scan_video_for_index_mentions(_Cfg(), con, "vidIdx2")
+    assert n == 3
+    for name in ("标普500", "纳斯达克100", "SOXX"):
+        assert dossier.dossier_note_path(root, name).exists()
+
+
+def test_scan_video_for_index_mentions_no_mention_is_noop():
+    con = dbm.connect()
+    _mk_video(con, "vidIdx3")
+    _write_article_with_body("vidIdx3", "这期讲的是英伟达财报，没提任何指数。")
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON) as m:
+        n = dossier.scan_video_for_index_mentions(_CfgFlag(), con, "vidIdx3")
+    assert n == 0
+    m.assert_not_called()
+
+
+def test_backfill_index_mentions_scans_all_wiki_videos():
+    con = dbm.connect()
+    _mk_video(con, "vidIdxAll1")
+    _mk_video(con, "vidIdxAll2", chan_uc="UCidx2")
+    _write_article_with_body("vidIdxAll1", "标普500今天涨了。")
+    _write_article_with_body("vidIdxAll2", "这期跟指数无关，讲的是台积电。")
+    root = Path(_TMP) / "vault-idxbackfill"
+
+    class _Cfg:
+        def get(self, k, d=None): return d
+        @property
+        def vault_root(self): return root
+
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        result = dossier.backfill_index_mentions(_Cfg(), con)
+    assert result["videos_matched"] >= 1
+    assert result["entries_added"] >= 1
+    assert dossier.dossier_note_path(root, "标普500").exists()
+
+
+def test_trigger_company_dossier_also_runs_index_scan():
+    """新流程钩子：写入 vault 之后，除了 companies 字段驱动的公司抽取，
+    还要跑一遍指数扫描——这样即使某篇文章的 companies 字段没标出指数，
+    只要正文提到了，以后也不会漏掉。"""
+    con = dbm.connect()
+    _mk_video(con, "vidHook1")
+    _write_article_with_body("vidHook1", "今天标普500波动挺大。", companies=[])
+    root = Path(_TMP) / "vault-hook-idx"
+
+    class _Cfg:
+        def get(self, k, d=None): return True if k == "dossier.enabled" else d
+        @property
+        def vault_root(self): return root
+
+    stats = pipeline.RunStats()
+    stats.vault_written_ids = ["vidHook1"]
+    log = RunLogger("vidHook1")
+    with mock.patch.object(providers, "complete", return_value=FAKE_JSON):
+        pipeline._trigger_company_dossier(con, _Cfg(), stats, log)
+    assert dossier.dossier_note_path(root, "标普500").exists()
+
+
 # --- dossier.py: historical backfill ----------------------------------------
 
 def test_backfill_all_processes_every_wiki_write_once():
@@ -862,6 +997,7 @@ def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
     assert b"data-range-for=" in r.data
     assert b"applyRange" in r.data
     assert b"priceLevelTable" in r.data
+    assert b"crosshairPlugin" in r.data and b"afterDraw" in r.data  # hover guide lines
 
 
 def test_dossier_chart_shows_current_price_reference_line():
@@ -1122,6 +1258,7 @@ def test_company_page_renders_pe_history_chart():
     assert "期间均值" in body and "42.83" in body        # (38.0+47.65)/2
     assert "当前动态市盈率 " in body and "31.08" in body   # 虚线参考
     assert "财年交界处会有台阶" in body                    # 口径限制要说清楚
+    assert "crosshairPlugin" in body                       # 悬停十字准线
 
 
 def test_company_page_explains_when_pe_line_cannot_be_drawn():
@@ -1324,6 +1461,7 @@ def test_index_entity_page_shows_real_forward_pe_history():
     # 指数自己就是基准，不该再跟基准对比
     assert "放到市场里看" not in body
     assert "雅虎财经没有" not in body           # 不该退化成"查不到"
+    assert "crosshairPlugin" in body            # 指数图也有悬停十字准线
 
 
 def test_dossier_chart_click_popup_lets_you_delete_a_point():

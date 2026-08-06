@@ -286,7 +286,117 @@ TICKER_MAP: dict[str, str | None] = {
     "南亚科": "2408.TW", "菲利普莫里斯国际": "PM", "诺基亚": "NOK",
     "阿斯利康": "AZN", "SOXL": "SOXL", "SOXX": "SOXX", "SPCX": "SPCX",
     "纳斯达克100": "^NDX", "Rocket Lab": "RKLB", "SanDisk": "SNDK",
+    "标普500": "^GSPC", "S&P 500": "^GSPC", "IGV": "IGV", "XLK": "XLK",
+    "XLF": "XLF", "QQQ": "QQQ", "SMH": "SMH",
 }
+
+# ── 指数级"动态市盈率"历史 ─────────────────────────────────────────────
+# 这是雅虎给不了的东西：每个历史时点上市场当时的一致预期市盈率（彭博
+# 终端里的 BEst P/E Ratio 1BF）。historyofmarket.com 把这几条序列免费
+# 公开成静态 JSON（CC BY 4.0，注明出处即可），这是目前找到的唯一免费源。
+#
+# 注意 IGV（软件行业 ETF）没有对应序列——这个站只覆盖标普500 / 纳指100
+# / 费城半导体 / 信息科技 / 金融这五条，软件行业级的一致预期市盈率暂时
+# 没有免费来源。
+_HOM_BASE = "https://historyofmarket.com/api"
+BENCHMARK_SOURCES: dict[str, dict] = {
+    "^GSPC": {"label": "标普500", "url": f"{_HOM_BASE}/sp500/forward-pe.json",
+              "kind": "index"},
+    "^NDX": {"label": "纳斯达克100", "url": f"{_HOM_BASE}/ndx/forward-pe.json",
+             "kind": "index"},
+    "SOXX": {"label": "费城半导体", "url": f"{_HOM_BASE}/sectors/forward-pe.json",
+             "kind": "sector", "sector": "sox"},
+    "^SOX": {"label": "费城半导体", "url": f"{_HOM_BASE}/sectors/forward-pe.json",
+             "kind": "sector", "sector": "sox"},
+    "XLK": {"label": "信息科技", "url": f"{_HOM_BASE}/sectors/forward-pe.json",
+            "kind": "sector", "sector": "inft"},
+    "XLF": {"label": "金融", "url": f"{_HOM_BASE}/sectors/forward-pe.json",
+            "kind": "sector", "sector": "finl"},
+}
+# QQQ 就是跟踪纳指100 的 ETF，SMH/SOXL 跟半导体同源，估值上可以共用
+BENCHMARK_SOURCES["QQQ"] = BENCHMARK_SOURCES["^NDX"]
+BENCHMARK_SOURCES["SMH"] = BENCHMARK_SOURCES["SOXX"]
+BENCHMARK_SOURCES["SOXL"] = BENCHMARK_SOURCES["SOXX"]
+
+_HOM_UA = "YouTubeRecorder (personal research tool; historyofmarket.com CC-BY-4.0)"
+_BENCH_CACHE: dict[str, tuple[float, dict]] = {}
+_BENCH_TTL_SEC = 6 * 3600      # 这些序列是周频/月频，半天刷一次绰绰有余
+
+
+def fetch_benchmark_forward_pe(ticker: str) -> dict:
+    """取指数/板块级的"历史动态市盈率"曲线。
+
+    返回 {"label":..., "series":[{"date","value"},...], "current": 数字|None,
+    "trailing": [...] 或 [], "source_url":...}；没有对应序列就返回 {}。
+
+    为什么必须用外部源：动态市盈率的历史值需要"当时"的分析师一致预期，
+    雅虎只暴露当前这一个快照。这条数据平时是彭博/FactSet 的付费产品，
+    historyofmarket.com 免费公开了标普500(1990起) / 纳指100(2001起) /
+    费城半导体(2002起) / 信息科技(1998起) / 金融(1996起) 五条。
+    软件行业（IGV）没有免费序列。"""
+    import time
+    src = BENCHMARK_SOURCES.get(ticker)
+    if not src:
+        return {}
+    key = ticker
+    hit = _BENCH_CACHE.get(key)
+    if hit and time.time() - hit[0] < _BENCH_TTL_SEC:
+        return hit[1]
+    out: dict = {}
+    try:
+        import requests
+        r = requests.get(src["url"], headers={"User-Agent": _HOM_UA}, timeout=20)
+        r.raise_for_status()
+        d = r.json()
+        if src["kind"] == "sector":
+            node = (d.get("sectors") or {}).get(src["sector"]) or {}
+            series = node.get("series") or []
+            trailing = []
+        else:
+            series = d.get("forward") or []
+            trailing = d.get("trailing") or []
+        series = [p for p in series if p.get("value") is not None]
+        trailing = [p for p in trailing if p.get("value") is not None]
+        if series:
+            out = {
+                "label": src["label"],
+                "series": [{"date": p["date"], "value": round(float(p["value"]), 2)}
+                           for p in series],
+                "trailing": [{"date": p["date"], "value": round(float(p["value"]), 2)}
+                             for p in trailing],
+                "current": round(float(series[-1]["value"]), 2),
+                "source_url": src["url"],
+            }
+    except Exception:
+        out = {}
+    _BENCH_CACHE[key] = (time.time(), out)
+    return out
+
+
+def benchmark_percentile(series: list[dict], value: float | None = None,
+                         since: str = "2011-01-01") -> dict:
+    """给一条动态市盈率序列算"当前处在历史什么位置"。
+
+    since 默认 2011 是有原因的：2002~2010 年半导体（以及金融在 2008~2012）
+    的总盈利多次逼近或跌破零，除出来的市盈率会飙到一两百倍甚至断档，那
+    不是"大家真的付了这个价"，而是分母趋近于零的除法爆炸。拿它算均值和
+    分位数会把结论带偏，所以默认只用 2011 之后这段干净的样本。"""
+    pts = [p for p in series if p["date"] >= since]
+    if not pts:
+        pts = series
+    if not pts:
+        return {}
+    vals = sorted(p["value"] for p in pts)
+    cur = value if value is not None else series[-1]["value"]
+    below = sum(1 for v in vals if v <= cur)
+    return {
+        "n": len(vals), "since": pts[0]["date"],
+        "min": vals[0], "max": vals[-1],
+        "median": vals[len(vals) // 2],
+        "mean": round(sum(vals) / len(vals), 2),
+        "current": cur,
+        "pct": round(100.0 * below / len(vals), 1),
+    }
 
 
 def _ai_resolve_ticker(cfg, con, name: str) -> str | None:

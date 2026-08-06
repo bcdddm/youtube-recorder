@@ -1155,6 +1155,177 @@ def test_company_page_explains_when_pe_line_cannot_be_drawn():
     assert "ADR" in body                       # 说明为什么画不出来
 
 
+def _bench_series(pairs):
+    return [{"date": d, "value": v} for d, v in pairs]
+
+
+def test_benchmark_percentile_ignores_pre_2011_distortion():
+    """2002~2010 板块盈利趋近于零时市盈率会飙到一两百倍，那是除法爆炸
+    不是真实估值，算均值/分位时必须排除。"""
+    s = _bench_series([("2009-06-01", 190.0), ("2010-01-01", 120.0),
+                      ("2011-06-01", 12.0), ("2015-06-01", 16.0),
+                      ("2020-06-01", 20.0), ("2026-06-01", 24.0)])
+    st = dossier.benchmark_percentile(s)
+    assert st["n"] == 4                    # 只用了 2011 之后的 4 个点
+    assert st["since"] == "2011-06-01"
+    assert st["max"] == 24.0               # 190/120 没有进来
+    assert st["min"] == 12.0
+    assert st["pct"] == 100.0              # 当前 24 是这段里最高
+
+
+def test_benchmark_percentile_positions_current_value():
+    s = _bench_series([("2011-01-01", 10.0), ("2013-01-01", 20.0),
+                      ("2015-01-01", 30.0), ("2017-01-01", 40.0)])
+    st = dossier.benchmark_percentile(s, value=25.0)
+    assert st["current"] == 25.0
+    assert st["pct"] == 50.0               # 10/20 <= 25，4 个里 2 个
+    assert st["mean"] == 25.0
+
+
+def test_fetch_benchmark_forward_pe_parses_index_payload():
+    class _R:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"current": {"forward": 20.12},
+                   "forward": [{"date": "1990-06-29", "value": 14.1},
+                               {"date": "2026-08-05", "value": 20.12},
+                               {"date": "2026-08-06", "value": None}],
+                   "trailing": [{"date": "2026-08-05", "value": 27.95}]}
+    fake_req = types.SimpleNamespace(get=lambda *a, **k: _R())
+    dossier._BENCH_CACHE.clear()
+    with mock.patch.dict(sys.modules, {"requests": fake_req}):
+        out = dossier.fetch_benchmark_forward_pe("^GSPC")
+    assert out["label"] == "标普500"
+    assert out["current"] == 20.12
+    assert len(out["series"]) == 2          # None 的点被过滤掉
+    assert out["trailing"] == [{"date": "2026-08-05", "value": 27.95}]
+
+
+def test_fetch_benchmark_forward_pe_parses_sector_payload():
+    class _R:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"sectors": {"sox": {"ticker": "SOX", "etf": "SOXX",
+                                       "series": [{"date": "2002-01-11", "value": 30.0},
+                                                  {"date": "2026-08-05", "value": 21.68}]}}}
+    fake_req = types.SimpleNamespace(get=lambda *a, **k: _R())
+    dossier._BENCH_CACHE.clear()
+    with mock.patch.dict(sys.modules, {"requests": fake_req}):
+        out = dossier.fetch_benchmark_forward_pe("SOXX")
+    assert out["label"] == "费城半导体"
+    assert out["current"] == 21.68
+    assert len(out["series"]) == 2
+
+
+def test_fetch_benchmark_forward_pe_unknown_ticker_and_failure():
+    dossier._BENCH_CACHE.clear()
+    assert dossier.fetch_benchmark_forward_pe("IGV") == {}   # 软件行业没有免费序列
+    assert dossier.fetch_benchmark_forward_pe("AAPL") == {}
+
+    def _boom(*a, **k): raise RuntimeError("net down")
+    fake_req = types.SimpleNamespace(get=_boom)
+    dossier._BENCH_CACHE.clear()
+    with mock.patch.dict(sys.modules, {"requests": fake_req}):
+        assert dossier.fetch_benchmark_forward_pe("^GSPC") == {}
+
+
+def _mk_company(vault_name, company, vid):
+    gvault = Path(_TMP) / vault_name
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+    dossier.append_dossier_entries(
+        gvault, company, video_id=vid, published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=dbm.connect())
+
+
+def test_company_page_compares_forward_pe_against_benchmarks():
+    """核心功能：把公司的动态市盈率放进市场基准里看贵贱。"""
+    from youtube_recorder import gui
+    _mk_company("vault-bench-cmp", "基准对比公司", "vc-bench")
+
+    def _bench(tk):
+        return {"^GSPC": {"label": "标普500", "current": 20.12,
+                         "series": _bench_series([("2011-01-01", 12.0),
+                                                 ("2026-08-05", 20.12)])},
+               "SOXX": {"label": "费城半导体", "current": 21.68,
+                        "series": _bench_series([("2011-01-01", 9.0),
+                                                ("2026-08-05", 21.68)])}}.get(tk, {})
+
+    fake_val = {"forward_pe": 31.08, "trailing_pe": 42.2, "forward_eps": 12.07}
+    with mock.patch.object(dossier, "resolve_ticker", return_value="ISRG"), \
+         mock.patch.object(dossier, "fetch_price_history",
+                          return_value=[{"date": "2026-07-01", "close": 375.0}]), \
+         mock.patch.object(dossier, "fetch_valuation", return_value=fake_val), \
+         mock.patch.object(dossier, "fetch_pe_history", return_value=[]), \
+         mock.patch.object(dossier, "fetch_benchmark_forward_pe", side_effect=_bench):
+        r = gui.app.test_client().get("/companies/基准对比公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "放到市场里看" in body
+    assert "标普500" in body and "20.12" in body
+    assert "费城半导体" in body and "21.68" in body
+    # 31.08 / 20.12 - 1 = +54%；31.08 / 21.68 - 1 = +43%
+    assert "溢价 54%" in body and "溢价 43%" in body
+    assert "基准所处分位" in body
+
+
+def test_company_page_shows_discount_when_cheaper_than_benchmark():
+    """英伟达这种情况：动态 PE 17 反而比费半指数 21.68 便宜，
+    要显示成折价而不是溢价。"""
+    from youtube_recorder import gui
+    _mk_company("vault-bench-disc", "折价公司", "vc-disc")
+
+    def _bench(tk):
+        return {"SOXX": {"label": "费城半导体", "current": 21.68,
+                        "series": _bench_series([("2011-01-01", 9.0),
+                                                ("2026-08-05", 21.68)])}}.get(tk, {})
+
+    with mock.patch.object(dossier, "resolve_ticker", return_value="NVDA"), \
+         mock.patch.object(dossier, "fetch_price_history",
+                          return_value=[{"date": "2026-07-01", "close": 200.0}]), \
+         mock.patch.object(dossier, "fetch_valuation",
+                          return_value={"forward_pe": 17.01, "trailing_pe": 33.57,
+                                       "forward_eps": 12.89}), \
+         mock.patch.object(dossier, "fetch_pe_history", return_value=[]), \
+         mock.patch.object(dossier, "fetch_benchmark_forward_pe", side_effect=_bench):
+        r = gui.app.test_client().get("/companies/折价公司")
+    body = r.data.decode("utf-8")
+    assert "折价 22%" in body                # 17.01/21.68-1 = -21.5%
+
+
+def test_index_entity_page_shows_real_forward_pe_history():
+    """指数实体页要画真正的历史动态市盈率曲线（彭博 BEst P/E 那条线）。"""
+    from youtube_recorder import gui
+    _mk_company("vault-idx", "SOXX指数", "vc-idx")
+    bench = {"label": "费城半导体", "current": 21.68, "trailing": [],
+            "series": _bench_series([("2002-01-11", 30.0), ("2011-06-01", 12.0),
+                                    ("2024-06-01", 29.7), ("2026-08-05", 21.68)])}
+    with mock.patch.object(dossier, "resolve_ticker", return_value="SOXX"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=[]), \
+         mock.patch.object(dossier, "fetch_valuation",
+                          return_value={"forward_pe": None, "trailing_pe": None,
+                                       "forward_eps": None}), \
+         mock.patch.object(dossier, "fetch_benchmark_forward_pe",
+                          return_value=bench):
+        r = gui.app.test_client().get("/companies/SOXX指数")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "历史动态市盈率" in body
+    assert "bench_SOXX" in body
+    assert "21.68" in body
+    assert "BEst P/E Ratio 1BF" in body        # 说明这就是彭博那条线
+    assert "分位" in body
+    # 指数自己就是基准，不该再跟基准对比
+    assert "放到市场里看" not in body
+    assert "雅虎财经没有" not in body           # 不该退化成"查不到"
+
+
 def test_dossier_chart_click_popup_lets_you_delete_a_point():
     from youtube_recorder import gui
     import re, html as _html, json as _json

@@ -3482,8 +3482,14 @@ def company_view(name: str):
     _pe_hist = (_dossier.fetch_pe_history(ticker, history,
                                           (_val or {}).get("trailing_pe"))
                 if ticker and history else [])
+    # 这个标的本身就是指数/板块（标普500、纳指100、SOXX…）时，直接画它
+    # 真正的历史动态市盈率曲线——这条线雅虎给不了，来自 historyofmarket。
+    _own_bench = _dossier.fetch_benchmark_forward_pe(ticker) if ticker else {}
     valuation_html = _dossier_valuation_html(
-        ticker, _val, history[-1]["close"] if history else None, _pe_hist)
+        ticker, _val, history[-1]["close"] if history else None, _pe_hist,
+        _own_bench)
+    benchmark_html = _dossier_benchmark_html(
+        ticker, (_val or {}).get("forward_pe"), _own_bench)
 
     outlier_note = ""
     if excluded:
@@ -3519,11 +3525,123 @@ def company_view(name: str):
 <a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
 {summary_html}
 {valuation_html}
+{benchmark_html}
 {chart_html}
 {outlier_note}
 {levels_html}
 <div class=card><div class=md>{html}</div></div>"""
     return page(name, "companies", body)
+
+
+_BENCH_COMPARE = ["^GSPC", "^NDX", "SOXX"]
+
+
+def _val_cell(label, value, hint):
+    v = value if value is not None else "—"
+    return (f'<div style="min-width:120px">'
+            f'<div class=dim style="font-size:.8em;white-space:nowrap">{label}</div>'
+            f'<div style="font-size:1.45em;font-weight:600">{v}</div>'
+            f'<div class=dim style="font-size:.75em;white-space:nowrap">{hint}</div>'
+            f'</div>')
+
+
+def _dossier_benchmark_html(ticker: str | None, forward_pe: float | None,
+                            own_bench: dict) -> str:
+    """把这家公司的动态市盈率放到市场基准里去看。
+
+    这是整件事的重点：单看"动态市盈率 31 倍"没法判断贵贱，但知道同期
+    标普500 是 20.1 倍、费城半导体是 21.7 倍，而且费半自己正处在 2011
+    年以来的 80% 分位，这才构成一个判断。
+
+    如果这个标的本身就是指数（own_bench 非空），就不做对比——它的历史
+    曲线已经画在估值卡片里了。"""
+    from . import dossier as _dossier
+    if not ticker or forward_pe is None or own_bench:
+        return ""
+    rows = []
+    for bt in _BENCH_COMPARE:
+        b = _dossier.fetch_benchmark_forward_pe(bt)
+        if not b or not b.get("current"):
+            continue
+        st = _dossier.benchmark_percentile(b["series"])
+        prem = (forward_pe / b["current"] - 1) * 100
+        color = "#d16060" if prem > 0 else "#9ece6a"
+        word = "溢价" if prem > 0 else "折价"
+        rows.append(
+            f'<tr><td>{escape(b["label"])}</td>'
+            f'<td>{b["current"]}</td>'
+            f'<td style="color:{color}">{word} {abs(prem):.0f}%</td>'
+            f'<td class=dim>{st.get("pct", "—")}%</td>'
+            f'<td class=dim>{st.get("min", "—")} – {st.get("max", "—")}</td>'
+            f'<td class=dim>{st.get("mean", "—")}</td></tr>')
+    if not rows:
+        return ""
+    return (
+        f'<div class=card><h3>放到市场里看（动态市盈率 {forward_pe}）</h3>'
+        f'<table><tr><th>基准</th><th>当前动态PE</th>'
+        f'<th>本股相对基准</th><th>基准所处分位</th>'
+        f'<th>基准区间</th><th>基准均值</th></tr>{"".join(rows)}</table>'
+        f'<div class=dim style="margin-top:8px;font-size:.82em">'
+        f'"基准所处分位"= 基准自己的动态市盈率在 2011 年以来的位置，'
+        f'越高说明整个市场/板块越贵。这两列要一起看：本股相对基准便宜、'
+        f'但基准本身在高位，那只是"贵里面比较不贵"。<br>'
+        f'2011 年起算是因为 2002~2010 年板块总盈利多次逼近零，'
+        f'除出来的市盈率会飙到一两百倍，那是分母趋近于零的除法爆炸，'
+        f'不是真实成交的估值。</div>'
+        f'<div class=dim style="margin-top:4px;font-size:.75em">'
+        f'动态市盈率历史来源：historyofmarket.com（CC BY 4.0）· 缓存 6 小时'
+        f'</div></div>')
+
+
+def _dossier_benchmark_chart_html(ticker: str, bench: dict) -> str:
+    """指数/板块自己的历史动态市盈率曲线——就是彭博 BEst P/E 1BF 那条线。"""
+    if not bench or not bench.get("series"):
+        return ""
+    from . import dossier as _dossier
+    import json as _json
+    s = bench["series"]
+    st = _dossier.benchmark_percentile(s)
+    cid = "bench_" + "".join(c for c in ticker if c.isalnum())[:16]
+    data_json = escape(_json.dumps({
+        "labels": [p["date"] for p in s],
+        "fwd": [p["value"] for p in s],
+        "trailing": bench.get("trailing") or [],
+        "mean": st.get("mean"),
+    }, ensure_ascii=False))
+    return f"""<div style="margin-top:14px">
+<div class=dim style="font-size:.85em;margin-bottom:6px">
+历史动态市盈率（12 个月一致预期）——{len(s)} 个数据点，
+{s[0]['date']} 至 {s[-1]['date']}。当前 {bench['current']}，
+2011 年以来区间 {st.get('min')}–{st.get('max')}，均值 {st.get('mean')}，
+当前处在 <b>{st.get('pct')}% 分位</b>。
+这正是彭博终端里 BEst P/E Ratio 1BF 那条线，雅虎给不了。</div>
+<canvas id="{cid}" height="80" data-bench="{data_json}"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+(function(){{
+  var el = document.getElementById("{cid}");
+  if (!el || typeof Chart === "undefined") return;
+  var d = JSON.parse(el.dataset.bench);
+  var ds = [{{label: "动态市盈率", data: d.fwd, borderColor: "#e0a458",
+             pointRadius: 0, borderWidth: 1.6, tension: 0.1}}];
+  if (d.mean) {{
+    ds.push({{label: "2011年来均值 " + d.mean,
+      data: d.labels.map(function(){{ return d.mean; }}),
+      borderColor: "#6b6b73", borderWidth: 1, borderDash: [5, 4],
+      pointRadius: 0, tension: 0}});
+  }}
+  new Chart(el, {{
+    type: "line", data: {{labels: d.labels, datasets: ds}},
+    options: {{responsive: true,
+      interaction: {{mode: "nearest", intersect: false}},
+      plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
+        if (ctx.dataset.label === "动态市盈率") return "动态市盈率 " + ctx.raw;
+        return ctx.dataset.label;
+      }}}}}}}},
+      scales: {{x: {{ticks: {{maxTicksLimit: 9}}}}}}}}
+  }});
+}})();
+</script></div>"""
 
 
 def _dossier_pe_chart_html(ticker: str, pe_hist: list[dict],
@@ -3585,7 +3703,8 @@ EPS 按最近一个已公布财年计，所以线在财年交界处会有台阶�
 
 def _dossier_valuation_html(ticker: str | None, val: dict | None,
                             current_price: float | None,
-                            pe_hist: list[dict] | None = None) -> str:
+                            pe_hist: list[dict] | None = None,
+                            own_bench: dict | None = None) -> str:
     """估值小卡片：动态市盈率（远期 PE）+ 静态市盈率（TTM）+ 一致预期 EPS。
 
     数据全部来自雅虎财经（yfinance），不需要额外 API key、不花钱。覆盖上
@@ -3595,21 +3714,27 @@ def _dossier_valuation_html(ticker: str | None, val: dict | None,
     if not ticker:
         return ""
     val = val or {}
+    own_bench = own_bench or {}
     fwd, ttm = val.get("forward_pe"), val.get("trailing_pe")
+    # 指数/板块本身：雅虎给不了它的市盈率，但我们有真正的历史动态市盈率
+    # 序列（historyofmarket），直接用那条线，比雅虎的空值有用得多。
+    if own_bench and own_bench.get("current") is not None:
+        chart = _dossier_benchmark_chart_html(ticker, own_bench)
+        return (f'<div class=card><h3>估值（{escape(ticker)} · '
+                f'{escape(own_bench["label"])}）</h3>'
+                f'<div style="display:flex;gap:26px;flex-wrap:wrap">'
+                f'{_val_cell("动态市盈率 (Forward P/E)", own_bench["current"], "12 个月一致预期")}'
+                f'{_val_cell("当前价", current_price, "最新收盘") if current_price is not None else ""}'
+                f'</div>{chart}'
+                f'<div class=dim style="margin-top:4px;font-size:.75em">'
+                f'来源：historyofmarket.com（CC BY 4.0）· 缓存 6 小时</div></div>')
     if fwd is None and ttm is None:
         return ('<div class=card class=dim style="font-size:.9em">'
                 f'估值：雅虎财经没有 {escape(ticker)} 的市盈率数据'
                 '（ETF、指数和部分冷门标的没有一致预期 EPS，属正常情况）。'
                 '</div>')
 
-    def _cell(label, value, hint):
-        v = value if value is not None else "—"
-        return (f'<div style="min-width:120px">'
-                f'<div class=dim style="font-size:.8em;white-space:nowrap">{label}</div>'
-                f'<div style="font-size:1.45em;font-weight:600">{v}</div>'
-                f'<div class=dim style="font-size:.75em;white-space:nowrap">{hint}</div>'
-                f'</div>')
-
+    _cell = _val_cell
     cells = [
         _cell("动态市盈率 (Forward P/E)", fwd, "按未来 12 个月一致预期 EPS"),
         _cell("静态市盈率 (TTM P/E)", ttm, "按过去 12 个月已实现 EPS"),

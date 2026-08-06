@@ -7,6 +7,14 @@ dependencies = [
     "PyYAML>=6.0",
     "certifi",
     "keyring>=24",
+    # 严格说这几个是 gui.py/visuals.py 用的，但它们跟核心网页界面/截图
+    # 召回功能一样，从来不是"可选模组"——之前只是因为开发机上早就装好了
+    # 才没人发现 pyproject.toml 里其实从没声明过它们；这次 Windows CI
+    # 用一台全新机器跑 `pip install -e .` 才第一次暴露出来
+    # （ModuleNotFoundError: No module named 'flask'）。
+    "flask>=3.0",
+    "markdown>=3.5",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

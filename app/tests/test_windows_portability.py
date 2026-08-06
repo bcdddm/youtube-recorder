@@ -207,6 +207,42 @@ def test_download_reveal_uses_open_dash_r_on_macos(monkeypatch):
         run.assert_called_once_with(["open", "-R", str(f)])
 
 
+# --- lock.py: fcntl was a hard import-time crash on Windows -----------------
+
+def test_lock_uses_msvcrt_on_windows_and_writes_pid(monkeypatch):
+    """fcntl doesn't exist on Windows at all — the old top-level `import
+    fcntl` meant `import youtube_recorder.lock` (and therefore cli.py, which
+    every subcommand goes through) crashed immediately on Windows. Caught by
+    the real Windows CI runner, not by anything in this file originally —
+    added here after the fact so the dispatch logic has real coverage."""
+    import types
+    from youtube_recorder import lock as lock_mod
+
+    calls = []
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=1, LK_UNLCK=2,
+        locking=lambda fd, mode, n: calls.append((mode, n)))
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    lock_path = Path(_TMP) / "win-test.lock"
+    with lock_mod.ProcessLock(lock_path):
+        assert (1, 1) in calls  # LK_NBLCK acquire, 1 byte
+    assert (2, 1) in calls      # LK_UNLCK release, same byte range
+    # __enter__ truncates back to 0 and writes the real pid after locking,
+    # so the placeholder null byte written just to give msvcrt something to
+    # lock doesn't linger in the final file content.
+    assert lock_path.read_bytes() == str(os.getpid()).encode()
+
+
+def test_lock_still_uses_fcntl_on_posix(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from youtube_recorder import lock as lock_mod
+    lock_path = Path(_TMP) / "posix-test.lock"
+    with lock_mod.ProcessLock(lock_path):
+        assert lock_path.read_bytes() == str(os.getpid()).encode()
+
+
 # --- openai_audio.py: ffmpeg lookup no longer assumes Homebrew's mac path --
 
 def test_ffmpeg_fallback_no_longer_hardcodes_homebrew_path(monkeypatch):

@@ -35,7 +35,11 @@ for pkg in ("yt_dlp", "certifi", "anthropic", "openai", "pydantic",
            "httpcore", "h11", "sniffio", "anyio", "distro", "jiter", "tqdm",
            # 公司档案插件的点位图：yfinance 拉历史价格，靠这几个撑着
            "yfinance", "pandas", "numpy", "peewee", "multitasking",
-           "frozendict", "platformdirs", "curl_cffi", "websockets"):
+           "frozendict", "platformdirs", "curl_cffi", "websockets",
+           # API 密钥读写：keyring 靠 entry points 动态选后端（macOS 是
+           # Keychain，以后 Windows 分支会选 Credential Manager），跟
+           # yt-dlp/pywebview 一样属于静态扫描容易漏的动态 import
+           "keyring"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

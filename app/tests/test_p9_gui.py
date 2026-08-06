@@ -178,17 +178,17 @@ def test_tag_merge_interactive():
     con.commit(); con.close()
     wd = work_dir("tqvid01"); wd.mkdir(parents=True, exist_ok=True)
     (wd / "article.json").write_text(json.dumps(
-        {"tags": ["AI", "AI 芯片", "芯片"]}, ensure_ascii=False))
+        {"tags": ["AI", "AI 芯片", "芯片"]}, ensure_ascii=False), encoding="utf-8")
     gui._tagmap_path().write_text(json.dumps(
         {"map": {}, "decisions": {}, "tags": ["AI", "AI 芯片", "芯片"]},
-        ensure_ascii=False))
+        ensure_ascii=False), encoding="utf-8")
     cli = gui.app.test_client()
     r = cli.post("/tags/merge/answers", data={
         "_csrf": gui.CSRF,
         "answers": json.dumps({"AI 芯片": "芯片", "bogus": "AI"})})
     d = r.get_json()
     assert d["ok"] and d["applied"] == 1
-    saved = json.loads(gui._tagmap_path().read_text())
+    saved = json.loads(gui._tagmap_path().read_text(encoding="utf-8"))
     assert saved["decisions"]["AI 芯片"] == "芯片"
     assert saved["map"]["AI 芯片"] == "芯片"
 
@@ -208,14 +208,15 @@ def test_orphan_tag_counts_and_hidden_filter():
         con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES(?,'wiki',?,'h',?)",
                     (vid, f"/tmp/{vid}.md", dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
-        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False), encoding="utf-8")
     con.commit()
     counts = gui._canon_article_counts(con, {})
     assert counts["AI"] == 3 and counts["稀有A"] == 1 and counts["稀有B"] == 1
     con.close()
     # hidden filter hides orphans from reports.json
     gui._tagmap_path().write_text(json.dumps(
-        {"map": {}, "decisions": {}, "hidden": ["稀有A", "稀有B"]}, ensure_ascii=False))
+        {"map": {}, "decisions": {}, "hidden": ["稀有A", "稀有B"]}, ensure_ascii=False),
+        encoding="utf-8")
     cli = gui.app.test_client()
     data = cli.get("/reports.json").get_json()
     all_tags = {t for r in data for t in (r.get("tags") or [])}
@@ -243,7 +244,7 @@ def test_report_tag_remove():
     con.commit(); con.close()
     wd = work_dir("trvid"); wd.mkdir(parents=True, exist_ok=True)
     (wd / "article.json").write_text(json.dumps(
-        {"tags": ["投资", "美股", "英伟达"]}, ensure_ascii=False))
+        {"tags": ["投资", "美股", "英伟达"]}, ensure_ascii=False), encoding="utf-8")
     cli = gui.app.test_client()
     # reading page shows editable chips
     html = cli.get("/reports/trvid").get_data(as_text=True)
@@ -253,7 +254,7 @@ def test_report_tag_remove():
     d = r.get_json()
     assert d["ok"] and d["removed"] == 1 and "美股" not in d["tags"]
     # article.json updated
-    saved = json.loads((wd / "article.json").read_text())
+    saved = json.loads((wd / "article.json").read_text(encoding="utf-8"))
     assert saved["tags"] == ["投资", "英伟达"]
     # note frontmatter updated
     nt = open(note, encoding="utf-8").read()
@@ -282,15 +283,15 @@ def test_digest_bulk_tag_remove():
         open(note, "w", encoding="utf-8").write('---\ntags: ["AI"]\n---\n# t\n')
         con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
-        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False), encoding="utf-8")
     con.commit(); con.close()
     cli = gui.app.test_client()
     r = cli.post("/reports/digest/tag-remove", data={
         "_csrf": gui.CSRF, "date": "2026-07-20", "grp": "", "tag": "AI"})
     d = r.get_json()
     assert d["ok"] and d["removed"] == 2 and d["articles"] == 2
-    assert json.loads((work_dir("bd1") / "article.json").read_text())["tags"] == ["美股"]
-    assert json.loads((work_dir("bd2") / "article.json").read_text())["tags"] == ["财报"]
+    assert json.loads((work_dir("bd1") / "article.json").read_text(encoding="utf-8"))["tags"] == ["美股"]
+    assert json.loads((work_dir("bd2") / "article.json").read_text(encoding="utf-8"))["tags"] == ["财报"]
     # idempotent second call
     d2 = cli.post("/reports/digest/tag-remove", data={
         "_csrf": gui.CSRF, "date": "2026-07-20", "grp": "", "tag": "AI"}).get_json()
@@ -414,7 +415,7 @@ def test_maybe_autogenerate_digest():
                     "VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
         (wd / "article.json").write_text(json.dumps(
-            {"title_zh": vid, "tags": [], "summary": "s", "sections": []}, ensure_ascii=False))
+            {"title_zh": vid, "tags": [], "summary": "s", "sections": []}, ensure_ascii=False), encoding="utf-8")
 
     # 只有 2 篇时不应触发
     _seed("auto1"); _seed("auto2")
@@ -526,14 +527,14 @@ def test_rename_article_tags_everywhere():
         con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
                     "VALUES(?,'wiki',?,'h',?)", (vid, note, dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
-        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False), encoding="utf-8")
     con.commit(); con.close()
 
     result = gui.rename_tags_everywhere({"財報": "财报"})
     assert result["articles_changed"] == 2
     assert sorted(result["video_ids"]) == ["rn1", "rn2"]
-    assert json.loads((work_dir("rn1") / "article.json").read_text())["tags"] == ["财报", "美股"]
-    assert json.loads((work_dir("rn2") / "article.json").read_text())["tags"] == ["财报"]  # 去重
+    assert json.loads((work_dir("rn1") / "article.json").read_text(encoding="utf-8"))["tags"] == ["财报", "美股"]
+    assert json.loads((work_dir("rn2") / "article.json").read_text(encoding="utf-8"))["tags"] == ["财报"]  # 去重
 
     note1 = open(os.path.join(root, "rn1.md"), encoding="utf-8").read()
     assert 'tags: ["财报", "美股"]' in note1
@@ -578,7 +579,7 @@ def test_split_companies_everywhere():
         art = {"tags": tags}
         if companies is not None:
             art["companies"] = companies
-        (wd / "article.json").write_text(json.dumps(art, ensure_ascii=False))
+        (wd / "article.json").write_text(json.dumps(art, ensure_ascii=False), encoding="utf-8")
     con.commit(); con.close()
 
     entities = {"英伟达", "台积电"}
@@ -586,15 +587,15 @@ def test_split_companies_everywhere():
     assert sorted(result["video_ids"]) == ["sc1", "sc2"]  # sc3 未变化
     assert result["articles_changed"] == 2
 
-    art1 = json.loads((work_dir("sc1") / "article.json").read_text())
+    art1 = json.loads((work_dir("sc1") / "article.json").read_text(encoding="utf-8"))
     assert art1["tags"] == ["财报解读"]
     assert art1["companies"] == ["英伟达"]
 
-    art2 = json.loads((work_dir("sc2") / "article.json").read_text())
+    art2 = json.loads((work_dir("sc2") / "article.json").read_text(encoding="utf-8"))
     assert art2["tags"] == ["半导体"]
     assert art2["companies"] == ["台积电"]  # 已存在，去重不重复
 
-    art3 = json.loads((work_dir("sc3") / "article.json").read_text())
+    art3 = json.loads((work_dir("sc3") / "article.json").read_text(encoding="utf-8"))
     assert art3["tags"] == ["宏观数据"]
     assert "companies" not in art3  # 完全没触碰
 
@@ -625,8 +626,8 @@ def test_reports_json_includes_companies():
     con.commit(); con.close()
     wd = work_dir("rj1"); wd.mkdir(parents=True, exist_ok=True)
     (wd / "article.json").write_text(json.dumps(
-        {"tags": ["财报解读"], "companies": ["英伟达", "台积电"]}, ensure_ascii=False))
-
+        {"tags": ["财报解读"], "companies": ["英伟达", "台积电"]}, ensure_ascii=False),
+        encoding="utf-8")
     cli = gui.app.test_client()
     data = cli.get("/reports.json").get_json()
     row = next(r for r in data if r["video_id"] == "rj1")

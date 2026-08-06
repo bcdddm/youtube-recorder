@@ -21,6 +21,14 @@ jobs:
     defaults:
       run:
         working-directory: app
+    env:
+      # Windows 默认按系统 ANSI 代码页（往往是 cp1252）而不是 UTF-8 打开
+      # 文本文件/标准输出，这个项目里到处是中文注释/UI 文案/文件内容，
+      # 不强制 UTF-8 模式会在写中文内容的地方随机崩成
+      # UnicodeEncodeError（第一次 CI 跑就踩到了）。已经把代码里能找到的
+      # 具体调用点都显式传了 encoding="utf-8"，这里再加一层兜底，防止
+      # 漏网的调用点。
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 

@@ -185,7 +185,11 @@ def test_download_reveal_uses_explorer_on_windows(monkeypatch):
         r = client.post("/download/reveal",
                         data={"_csrf": gui.CSRF, "path": str(f)})
         assert r.status_code == 204
-        run.assert_called_once_with(["explorer", "/select,", str(f)])
+        # the route does Path(path).resolve() before shelling out, which on
+        # Windows can normalize an 8.3 short-name temp path (e.g.
+        # RUNNER~1) to its long-name form — compare against the same
+        # resolved value rather than the raw string we posted.
+        run.assert_called_once_with(["explorer", "/select,", str(f.resolve())])
 
 
 def test_download_reveal_uses_open_dash_r_on_macos(monkeypatch):
@@ -204,7 +208,7 @@ def test_download_reveal_uses_open_dash_r_on_macos(monkeypatch):
         r = client.post("/download/reveal",
                         data={"_csrf": gui.CSRF, "path": str(f)})
         assert r.status_code == 204
-        run.assert_called_once_with(["open", "-R", str(f)])
+        run.assert_called_once_with(["open", "-R", str(f.resolve())])
 
 
 # --- lock.py: fcntl was a hard import-time crash on Windows -----------------
@@ -236,11 +240,27 @@ def test_lock_uses_msvcrt_on_windows_and_writes_pid(monkeypatch):
 
 
 def test_lock_still_uses_fcntl_on_posix(monkeypatch):
+    """Mirrors the msvcrt test above: fcntl genuinely doesn't exist on the
+    Windows CI runner, so — just like msvcrt on macOS/Linux — it has to be
+    faked in sys.modules rather than assumed present, even though we're only
+    pretending to be on darwin via sys.platform. Without this, this test
+    itself was the thing crashing with ModuleNotFoundError on Windows CI,
+    not the code it was meant to verify."""
+    import types
     monkeypatch.setattr(sys, "platform", "darwin")
+
+    calls = []
+    fake_fcntl = types.SimpleNamespace(
+        LOCK_EX=1, LOCK_NB=2, LOCK_UN=4,
+        flock=lambda fh, op: calls.append(op))
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+
     from youtube_recorder import lock as lock_mod
     lock_path = Path(_TMP) / "posix-test.lock"
     with lock_mod.ProcessLock(lock_path):
+        assert (1 | 2) in calls  # LOCK_EX | LOCK_NB
         assert lock_path.read_bytes() == str(os.getpid()).encode()
+    assert 4 in calls  # LOCK_UN on exit
 
 
 # --- openai_audio.py: ffmpeg lookup no longer assumes Homebrew's mac path --

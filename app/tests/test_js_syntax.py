@@ -46,7 +46,7 @@ def test_digest_tools_js():
     s = re.search(r"<script>(.*?)</script>", gui._DIGEST_TOOLS_JS, re.S).group(1)
     s = s.replace("__RAWMD__", '"x"')
     p = tempfile.mktemp(suffix=".js")
-    open(p, "w").write(s)
+    open(p, "w", encoding="utf-8").write(s)
     r = subprocess.run(["node", "--check", p], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 

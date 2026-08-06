@@ -96,7 +96,7 @@ def test_existing_tag_vocab():
         con.execute("INSERT INTO writes(video_id,note_kind,note_path,content_hash,at) "
                     "VALUES(?,'wiki','/tmp/x.md','h',?)", (vid, dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
-        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False))
+        (wd / "article.json").write_text(json.dumps({"tags": tags}, ensure_ascii=False), encoding="utf-8")
     con.commit()
     (APP_SUPPORT / "tags-merge.json").write_text(
         json.dumps({"map": {"AI投资": "AI"}}, ensure_ascii=False), encoding="utf-8")
@@ -149,7 +149,7 @@ def test_existing_company_vocab():
                     "VALUES(?,'wiki','/tmp/x.md','h',?)", (vid, dbm.now()))
         wd = work_dir(vid); wd.mkdir(parents=True, exist_ok=True)
         (wd / "article.json").write_text(
-            json.dumps({"tags": [], "companies": companies}, ensure_ascii=False))
+            json.dumps({"tags": [], "companies": companies}, ensure_ascii=False), encoding="utf-8")
     con.commit()
 
     vocab = art_mod.existing_company_vocab(con)

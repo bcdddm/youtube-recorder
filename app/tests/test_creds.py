@@ -92,6 +92,6 @@ def test_creds_module_has_no_macos_specific_subprocess_calls():
     """Regression guard for the Windows-portability audit: creds.py used to
     shell out to macOS's `security` CLI directly, which is a hard blocker
     for any other platform. Make sure that's gone for good."""
-    src = Path(creds.__file__).read_text()
+    src = Path(creds.__file__).read_text(encoding="utf-8")
     assert "subprocess" not in src
     assert '"security"' not in src and "'security'" not in src

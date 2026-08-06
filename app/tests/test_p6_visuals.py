@@ -13,7 +13,7 @@ from youtube_recorder import article as art_mod   # noqa: E402
 from youtube_recorder import transcript as tr     # noqa: E402
 from youtube_recorder import visuals as vz        # noqa: E402
 
-SPIKE_SRT = Path(__file__).resolve().parents[2] / "spike-results" / "nnze4i2Mt6o.srt"
+SPIKE_SRT = Path(__file__).resolve().parent / "fixtures" / "sample_finance_transcript.srt"
 
 
 def _setup():

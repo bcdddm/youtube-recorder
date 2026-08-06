@@ -1,5 +1,11 @@
-"""P4 tests — uses the REAL spike SRT (contains a genuine trailing
-hallucination + out-of-bounds timestamp)."""
+"""P4 tests — uses a fabricated SRT fixture reproducing two real MacWhisper
+defect patterns (a trailing hallucination + an out-of-bounds timestamp),
+committed under tests/fixtures/ so this suite doesn't silently depend on the
+real, gitignored spike-results/ sample that only ever existed on one
+machine (spike-results/ is excluded from git on purpose — it holds actual
+transcribed YouTube audio, which shouldn't be checked into a public repo —
+but that meant this test quietly always passed locally and would only ever
+fail on a from-scratch checkout, which nothing exercised until Windows CI)."""
 
 import os
 import sys
@@ -12,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[0] / ".."))
 
 from youtube_recorder import transcript as tr  # noqa: E402
 
-SPIKE_SRT = Path(__file__).resolve().parents[2] / "spike-results" / "nnze4i2Mt6o.srt"
+SPIKE_SRT = Path(__file__).resolve().parent / "fixtures" / "sample_transcript_with_defects.srt"
 
 
 def test_real_spike_srt():

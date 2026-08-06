@@ -17,7 +17,7 @@ from youtube_recorder import transcript as tr       # noqa: E402
 from youtube_recorder import vault as vt            # noqa: E402
 from youtube_recorder import providers              # noqa: E402
 
-SPIKE_SRT = Path(__file__).resolve().parents[2] / "spike-results" / "nnze4i2Mt6o.srt"
+SPIKE_SRT = Path(__file__).resolve().parent / "fixtures" / "sample_finance_transcript.srt"
 
 
 def _canonical():

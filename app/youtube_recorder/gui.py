@@ -3478,6 +3478,9 @@ def company_view(name: str):
     levels, excluded = _dossier.filter_price_level_outliers(raw_levels, reference)
 
     chart_html = _dossier_chart_html(name, ticker, history, levels)
+    valuation_html = _dossier_valuation_html(
+        ticker, _dossier.fetch_valuation(ticker) if ticker else None,
+        history[-1]["close"] if history else None)
 
     outlier_note = ""
     if excluded:
@@ -3512,11 +3515,62 @@ def company_view(name: str):
 <a class=dim href='/companies'>← 返回公司列表</a>
 <a class=dim href='obsidian://open?path={escape(str(path))}'>在 Obsidian 打开</a></div>
 {summary_html}
+{valuation_html}
 {chart_html}
 {outlier_note}
 {levels_html}
 <div class=card><div class=md>{html}</div></div>"""
     return page(name, "companies", body)
+
+
+def _dossier_valuation_html(ticker: str | None, val: dict | None,
+                            current_price: float | None) -> str:
+    """估值小卡片：动态市盈率（远期 PE）+ 静态市盈率（TTM）+ 一致预期 EPS。
+
+    数据全部来自雅虎财经（yfinance），不需要额外 API key、不花钱。覆盖上
+    的真实情况：普通个股（含台股/韩股）基本都有远期 PE；ETF 通常只有
+    静态 PE，因为 ETF 没有"一致预期 EPS"这个概念；指数两个都没有；成交
+    太清淡的小票也可能查不到。查不到的就明说查不到，不假装有数据。"""
+    if not ticker:
+        return ""
+    val = val or {}
+    fwd, ttm = val.get("forward_pe"), val.get("trailing_pe")
+    if fwd is None and ttm is None:
+        return ('<div class=card class=dim style="font-size:.9em">'
+                f'估值：雅虎财经没有 {escape(ticker)} 的市盈率数据'
+                '（ETF、指数和部分冷门标的没有一致预期 EPS，属正常情况）。'
+                '</div>')
+
+    def _cell(label, value, hint):
+        v = value if value is not None else "—"
+        return (f'<div style="min-width:120px">'
+                f'<div class=dim style="font-size:.8em;white-space:nowrap">{label}</div>'
+                f'<div style="font-size:1.45em;font-weight:600">{v}</div>'
+                f'<div class=dim style="font-size:.75em;white-space:nowrap">{hint}</div>'
+                f'</div>')
+
+    cells = [
+        _cell("动态市盈率 (Forward P/E)", fwd, "按未来 12 个月一致预期 EPS"),
+        _cell("静态市盈率 (TTM P/E)", ttm, "按过去 12 个月已实现 EPS"),
+    ]
+    if val.get("forward_eps") is not None:
+        cells.append(_cell("预期 EPS", val["forward_eps"], "未来 12 个月一致预期"))
+    if current_price is not None:
+        cells.append(_cell("当前价", current_price, "最新收盘"))
+    cheap_note = ""
+    if fwd is not None and ttm is not None:
+        if fwd < ttm:
+            cheap_note = ('<span class=dim style="font-size:.85em">'
+                         '动态低于静态 = 市场预期盈利还在增长</span>')
+        elif fwd > ttm:
+            cheap_note = ('<span class=dim style="font-size:.85em">'
+                         '动态高于静态 = 市场预期盈利会下滑</span>')
+    return (f'<div class=card><h3>估值（{escape(ticker)}）</h3>'
+            f'<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start">'
+            f'{"".join(cells)}</div>'
+            f'<div style="margin-top:8px">{cheap_note}</div>'
+            f'<div class=dim style="margin-top:4px;font-size:.75em">'
+            f'来源：雅虎财经 · 缓存 1 小时</div></div>')
 
 
 def _dossier_summary_html(name: str, summary_row, pinned: bool) -> str:
@@ -3612,7 +3666,8 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
                 "x": cluster[0]["mentioned_date"], "y": avg_price,
                 "items": [{"channel": r["channel"] or "未知频道",
                           "type": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""),
-                          "price": r["price"], "text": r["raw_text"]} for r in cluster],
+                          "price": r["price"], "text": r["raw_text"],
+                          "id": r["id"]} for r in cluster],
             })
     # 按频道分组、固定调色板按"第一次出现顺序"分配颜色——同一个频道在
     # 不同公司页面上颜色也是一致的
@@ -3623,15 +3678,17 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
         "color": palette[i % len(palette)],
         "points": [{"x": r["mentioned_date"], "y": r["price"],
                    "type": LEVEL_TYPE_LABELS_ZH.get(r["level_type"], r["level_type"] or ""),
-                   "text": r["raw_text"]} for r in by_channel[chan]],
+                   "text": r["raw_text"], "id": r["id"]} for r in by_channel[chan]],
     } for i, chan in enumerate(channels_order)]
 
     cid = "chart_" + "".join(c if c.isalnum() else "" for c in name)[:24] or "chart"
+    current_price = history[-1]["close"] if history else None
     data_json = escape(_json.dumps({
         "labels": [h["date"] for h in history],
         "close": [h["close"] for h in history],
         "groups": channel_groups,
         "merged": merged_points,
+        "current": current_price,
     }, ensure_ascii=False))
     range_btns = "".join(
         f'<button type=button class="{cls}" data-range-for="{cid}" '
@@ -3642,7 +3699,7 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
     return f"""<div class=card>
 <h3>价格走势与推荐点位（{escape(ticker)}）——短横线是视频里提到的点位，
 按频道上色；同一天价格相近（2% 以内）的点位合并成金色菱形显示，鼠标
-移上去看是谁说的、说了什么</h3>
+移上去看是谁说的、说了什么；虚线是当前价；点击点位可以直接删掉</h3>
 <div style="display:flex;gap:6px;margin-bottom:8px">{range_btns}</div>
 <canvas id="{cid}" height="90" data-chart="{data_json}"></canvas>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
@@ -3650,6 +3707,8 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
 (function(){{
   var el = document.getElementById("{cid}");
   var d = JSON.parse(el.dataset.chart);
+  var CSRF_TOK = {_json.dumps(CSRF)};
+  var DELETE_URL = {_json.dumps(f"/companies/{name}/price-level/delete")};
 
   function idxOfLabels(labels){{
     var m = {{}};
@@ -3669,10 +3728,17 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
       {{label: "收盘价", data: close, borderColor: "#7aa2f7",
         pointRadius: 0, borderWidth: 1.5, tension: 0.15}}
     ];
+    if (d.current !== null && d.current !== undefined) {{
+      datasets.push({{
+        label: "当前价 " + d.current, data: labels.map(function(){{ return d.current; }}),
+        borderColor: "#e9e9ec", borderDash: [6, 4], borderWidth: 1.5,
+        pointRadius: 0, tension: 0
+      }});
+    }}
     d.groups.forEach(function(g){{
       var pts = g.points.filter(function(p){{ return idx2[p.x] !== undefined; }})
         .map(function(p){{
-          return {{x: p.x, y: p.y, type: p.type, text: p.text, channel: g.channel}};
+          return {{x: p.x, y: p.y, type: p.type, text: p.text, channel: g.channel, id: p.id}};
         }});
       datasets.push({{
         label: g.channel, data: pts, type: "scatter",
@@ -3694,12 +3760,79 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
     return datasets;
   }}
 
+  function closePointPopup(){{
+    var old = document.getElementById("chartPointPopup_{cid}");
+    if (old) old.remove();
+  }}
+
+  function deletePricePoint(levelId, btn){{
+    if (!levelId) return;
+    btn.disabled = true;
+    btn.textContent = "…";
+    var body = new URLSearchParams();
+    body.set("_csrf", CSRF_TOK);
+    body.set("level_id", levelId);
+    fetch(DELETE_URL, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/x-www-form-urlencoded"}},
+      body: body.toString()
+    }}).then(function(){{ location.reload(); }})
+      .catch(function(){{ btn.disabled = false; btn.textContent = "✕"; }});
+  }}
+
+  function showPointPopup(nativeEvt, point){{
+    closePointPopup();
+    var items = point.items || [{{
+      channel: point.channel, type: point.type, price: point.y,
+      text: point.text, id: point.id
+    }}];
+    var box = document.createElement("div");
+    box.id = "chartPointPopup_{cid}";
+    box.style.cssText = "position:fixed;z-index:9999;background:#1b1b1f;" +
+      "border:1px solid #333;border-radius:10px;padding:10px 14px;max-width:320px;" +
+      "box-shadow:0 8px 24px rgba(0,0,0,.45);font-size:13.5px;line-height:1.6;color:#e9e9ec";
+    var left = nativeEvt.clientX + 12, top = nativeEvt.clientY + 12;
+    if (left + 320 > window.innerWidth) left = window.innerWidth - 330;
+    box.style.left = Math.max(8, left) + "px";
+    box.style.top = top + "px";
+    items.forEach(function(it, i){{
+      var row = document.createElement("div");
+      row.style.cssText = "text-align:center" +
+        (i > 0 ? ";margin-top:10px;padding-top:10px;border-top:1px solid #333" : "");
+      var info = document.createElement("div");
+      info.style.cssText = "white-space:pre-wrap;margin-bottom:6px";
+      info.textContent = (it.channel || "") + "：" + (it.type || "点位") + " " + it.price
+        + (it.text ? ("\\n" + it.text) : "");
+      var delBtn = document.createElement("button");
+      delBtn.textContent = "✕";
+      delBtn.title = "删除这个点位";
+      delBtn.style.cssText = "padding:3px 12px;border-radius:6px;cursor:pointer;" +
+        "background:#3a2020;border:1px solid #7a3a3a;color:#ffb4b4;font-weight:bold";
+      delBtn.addEventListener("click", function(e){{
+        e.stopPropagation();
+        deletePricePoint(it.id, delBtn);
+      }});
+      row.appendChild(info);
+      row.appendChild(delBtn);
+      box.appendChild(row);
+    }});
+    document.body.appendChild(box);
+  }}
+
   var chart = new Chart(el, {{
     type: "line",
     data: {{labels: d.labels, datasets: buildDatasets(d.labels, idxOfLabels(d.labels))}},
     options: {{
       responsive: true,
       interaction: {{mode: "nearest", intersect: false}},
+      onClick: function(evt, elements){{
+        if (!elements.length) {{ closePointPopup(); return; }}
+        var ei = elements[0];
+        var ds = chart.data.datasets[ei.datasetIndex];
+        var pt = ds.data[ei.index];
+        if (!pt || (!pt.items && pt.id === undefined)) {{ closePointPopup(); return; }}
+        showPointPopup(evt.native || evt, pt);
+      }},
       plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
         var p = ctx.raw;
         if (p && p.items) {{
@@ -3714,10 +3847,19 @@ def _dossier_chart_html(name: str, ticker: str | None, history: list[dict],
           return [ctx.dataset.label + "：" + (p.type || "点位") + " " + p.y,
                   p.text || ""];
         }}
-        return "收盘 " + ctx.raw;
+        if (ctx.dataset.label === "收盘价") return "收盘 " + ctx.raw;
+        return ctx.dataset.label;
       }}}}}}}},
       scales: {{x: {{ticks: {{maxTicksLimit: 10}}}}}}
     }}
+  }});
+
+  document.addEventListener("click", function(e){{
+    var popup = document.getElementById("chartPointPopup_{cid}");
+    if (!popup) return;
+    if (popup.contains(e.target)) return;
+    if (e.target === el || el.contains(e.target)) return;
+    closePointPopup();
   }});
 
   function applyRange(days){{

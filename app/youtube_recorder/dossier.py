@@ -354,6 +354,52 @@ def fetch_price_history(ticker: str, period: str = "5y") -> list[dict]:
     return out
 
 
+_VALUATION_CACHE: dict[str, tuple[float, dict]] = {}
+_VALUATION_TTL_SEC = 3600  # 1 小时——估值指标变化慢，不用跟价格一样勤
+
+
+def fetch_valuation(ticker: str) -> dict:
+    """返回 {"forward_pe": 数字|None, "trailing_pe": 数字|None,
+    "forward_eps": 数字|None}。数据来自雅虎财经（yfinance，本来就是依赖，
+    不需要额外的 API key，也不花钱）。
+
+    覆盖情况实测：美股个股、台股、韩股的普通股票基本都有 forwardPE；
+    ETF 一般只有 trailingPE 没有 forwardPE（因为没有"一致预期 EPS"这个
+    概念）；指数（^NDX 之类）两个都没有；成交太清淡的小票也可能没有。
+    取不到就返回 None，页面那边优雅降级不显示，不报错。"""
+    import time
+    hit = _VALUATION_CACHE.get(ticker)
+    if hit and time.time() - hit[0] < _VALUATION_TTL_SEC:
+        return hit[1]
+    out = {"forward_pe": None, "trailing_pe": None, "forward_eps": None}
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info or {}
+
+        def _num(v):
+            # 雅虎偶尔回负数/离谱大的 PE（盈利接近 0 时的除法爆炸），
+            # 这种数字没有解读价值，直接当作没有
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            if f <= 0 or f > 1000:
+                return None
+            return round(f, 2)
+
+        out["forward_pe"] = _num(info.get("forwardPE"))
+        out["trailing_pe"] = _num(info.get("trailingPE"))
+        try:
+            fe = float(info.get("forwardEps"))
+            out["forward_eps"] = round(fe, 4)
+        except (TypeError, ValueError):
+            out["forward_eps"] = None
+    except Exception:
+        pass
+    _VALUATION_CACHE[ticker] = (time.time(), out)
+    return out
+
+
 _OBS_LINE_RE = re.compile(
     r"^- \[(\d{4}-\d{2}-\d{2})\] (.*?)（来源：(?:(.+?) · )?\[\[([^\]]+)\]\]）$")
 

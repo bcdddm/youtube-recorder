@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -861,6 +862,222 @@ def test_dossier_chart_renders_line_and_scatter_when_ticker_and_history_found():
     assert b"data-range-for=" in r.data
     assert b"applyRange" in r.data
     assert b"priceLevelTable" in r.data
+
+
+def test_dossier_chart_shows_current_price_reference_line():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart-current"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "现价测试公司", video_id="vc-cur", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "100 支撑", "price": 100,
+                                 "level_type": "support"}]},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 95.0},
+                {"date": "2026-07-02", "close": 101.5}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="FAKE"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/现价测试公司")
+    assert r.status_code == 200
+    assert "当前价".encode() in r.data
+    assert b"101.5" in r.data                # latest close used as current price
+    assert b"borderDash" in r.data
+    assert "虚线是当前价".encode() in r.data     # header explains the dashed line
+
+
+def test_dossier_chart_current_price_absent_when_no_history():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart-nohist"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "无历史价格公司", video_id="vc-nh", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=con)
+    with mock.patch.object(dossier, "resolve_ticker", return_value=None):
+        r = client.get("/companies/无历史价格公司")
+    assert r.status_code == 200
+    assert "当前价".encode() not in r.data
+
+
+def test_fetch_valuation_filters_junk_pe_values():
+    """雅虎在盈利接近 0 时会回负数或几千倍的 PE，这种没有解读价值，
+    应该当作没有数据而不是照原样显示。"""
+    class _FakeTicker:
+        def __init__(self, info): self._info = info
+        @property
+        def info(self): return self._info
+
+    fake_yf = types.SimpleNamespace(
+        Ticker=lambda t: _FakeTicker(
+            {"forwardPE": -12.5, "trailingPE": 4200.0, "forwardEps": 3.25}))
+    dossier._VALUATION_CACHE.clear()
+    with mock.patch.dict(sys.modules, {"yfinance": fake_yf}):
+        out = dossier.fetch_valuation("JUNK")
+    assert out["forward_pe"] is None          # 负数丢弃
+    assert out["trailing_pe"] is None         # 大于 1000 丢弃
+    assert out["forward_eps"] == 3.25         # EPS 本身可以是任意值，保留
+
+
+def test_fetch_valuation_returns_rounded_values_and_caches():
+    class _FakeTicker:
+        calls = 0
+        def __init__(self, t): type(self).calls += 1
+        @property
+        def info(self):
+            return {"forwardPE": 31.083199, "trailingPE": 42.204723,
+                   "forwardEps": 12.07083}
+
+    fake_yf = types.SimpleNamespace(Ticker=_FakeTicker)
+    dossier._VALUATION_CACHE.clear()
+    _FakeTicker.calls = 0
+    with mock.patch.dict(sys.modules, {"yfinance": fake_yf}):
+        a = dossier.fetch_valuation("ISRG")
+        b = dossier.fetch_valuation("ISRG")     # 第二次应该命中缓存
+    assert a == {"forward_pe": 31.08, "trailing_pe": 42.2, "forward_eps": 12.0708}
+    assert b == a
+    assert _FakeTicker.calls == 1               # 只真正查了一次
+
+
+def test_fetch_valuation_survives_network_failure():
+    def _boom(_): raise RuntimeError("network down")
+    fake_yf = types.SimpleNamespace(Ticker=_boom)
+    dossier._VALUATION_CACHE.clear()
+    with mock.patch.dict(sys.modules, {"yfinance": fake_yf}):
+        out = dossier.fetch_valuation("NOPE")
+    assert out == {"forward_pe": None, "trailing_pe": None, "forward_eps": None}
+
+
+def test_company_page_shows_valuation_card():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-valuation"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "估值卡片公司", video_id="vc-val", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=con)
+    fake_hist = [{"date": "2026-07-01", "close": 500.0}]
+    fake_val = {"forward_pe": 31.08, "trailing_pe": 42.2, "forward_eps": 12.07}
+    with mock.patch.object(dossier, "resolve_ticker", return_value="ISRG"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist), \
+         mock.patch.object(dossier, "fetch_valuation", return_value=fake_val):
+        r = client.get("/companies/估值卡片公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "动态市盈率" in body and "31.08" in body
+    assert "静态市盈率" in body and "42.2" in body
+    assert "预期 EPS" in body and "12.07" in body
+    # 动态 < 静态，应该给出"盈利还在增长"的解读
+    assert "市场预期盈利还在增长" in body
+    assert "雅虎财经" in body
+
+
+def test_company_page_says_so_when_no_valuation_available():
+    """ETF/指数这类查不到市盈率的，要明说查不到，而不是显示空白或假数据。"""
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-noval"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "无估值公司", video_id="vc-noval", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=con)
+    empty_val = {"forward_pe": None, "trailing_pe": None, "forward_eps": None}
+    with mock.patch.object(dossier, "resolve_ticker", return_value="SOXX"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=[]), \
+         mock.patch.object(dossier, "fetch_valuation", return_value=empty_val):
+        r = client.get("/companies/无估值公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "没有 SOXX 的市盈率数据" in body
+    assert "属正常情况" in body
+
+
+def test_dossier_chart_click_popup_lets_you_delete_a_point():
+    from youtube_recorder import gui
+    import re, html as _html, json as _json
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-chart-delpoint"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "可删点位公司", video_id="vc-del", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": [], "concerns": [],
+               "price_levels": [{"text": "100 支撑", "price": 100,
+                                 "level_type": "support"}]},
+        con=con)
+    rows = dbm.dossier_price_levels_for(con, "可删点位公司")
+    assert len(rows) == 1
+    level_id = rows[0]["id"]
+    fake_hist = [{"date": "2026-07-01", "close": 95.0}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="FAKE"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist):
+        r = client.get("/companies/可删点位公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    # popup wiring present: onClick handler, delete function, chart-scoped
+    # popup element id, and a fetch to the existing delete route
+    assert "onClick:" in body
+    assert "deletePricePoint" in body
+    assert "chartPointPopup_" in body
+    assert "/companies/可删点位公司/price-level/delete" in body
+    assert "点击点位可以直接删掉" in body
+    # the point's DB id must be embedded in the chart JSON so the popup
+    # knows which level_id to send when its delete button is clicked
+    m = re.search(r'data-chart="([^"]*)"', body)
+    assert m
+    data = _json.loads(_html.unescape(m.group(1)))
+    ids = [p.get("id") for g in data["groups"] for p in g["points"]]
+    assert level_id in ids
+
+    # the delete route itself still works exactly as before (unaffected
+    # by the chart change) when called the way the popup's fetch() would
+    r2 = client.post(f"/companies/可删点位公司/price-level/delete",
+                     data={"_csrf": gui.CSRF, "level_id": str(level_id)})
+    assert r2.status_code in (302, 303)
+    assert dbm.dossier_price_levels_for(con, "可删点位公司") == []
 
 
 def test_dossier_chart_groups_points_by_channel_with_distinct_colors():

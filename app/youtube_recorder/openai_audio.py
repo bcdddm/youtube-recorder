@@ -15,7 +15,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+# 找不到就退回裸命令名，交给 subprocess 在实际调用时按 PATH 解析——之前
+# 写死 /opt/homebrew/bin/ffmpeg 只在 macOS+Homebrew 这一种装法下猜得中，
+# Windows/Linux 上会直接给一个保证不存在的路径。
+FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 DEFAULT_MAX_MB = 24  # OpenAI 上限 25MB，留余量
 
 

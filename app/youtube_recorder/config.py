@@ -10,6 +10,7 @@ Design rules (v0.2):
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,18 @@ from . import APP_NAME, AUTHOR
 from .paths import CONFIG_FILE
 
 VALID_TRANSCRIBERS = ("macwhisper_watch_srt", "openai_audio", "whisper_cpp", "skip")
+
+# MacWhisper 是 macOS 专属应用，没有 Windows 版；新建配置时按平台给一个
+# 能用的默认值，而不是让 Windows 用户新装完就对着一个永远不会被满足的
+# watchfolder 空等到超时。已存在的 config.yaml 不受影响——这只影响
+# write_default_if_missing() 第一次生成默认配置的那一刻。
+# 拆成一个纯函数（吃平台字符串、不读全局 sys.platform）是为了能在单测里
+# 不靠 monkeypatch/重新 import 就把 macOS/Windows/Linux 三条分支都断言到。
+def _default_transcriber(platform: str = sys.platform) -> str:
+    return "macwhisper_watch_srt" if platform == "darwin" else "openai_audio"
+
+
+_DEFAULT_TRANSCRIBER = _default_transcriber()
 VALID_ARTICLE_MODES = ("edited_article", "faithful_cleanup", "wiki_note")
 VALID_DIALOG_POLICY = ("on_new_videos", "always", "never")
 VALID_ON_DIALOG_ERROR = ("run", "skip")
@@ -64,7 +77,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "review_gate": False,
     },
     "transcription": {
-        "primary": "macwhisper_watch_srt",
+        "primary": _DEFAULT_TRANSCRIBER,
         "fallback": "openai_audio",
         "inbox_dir": str(Path.home() / "Coding" / "YouTube Recorder" / "macwhisper-inbox"),
         "timeout_minutes": 180,

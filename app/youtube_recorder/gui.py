@@ -1018,7 +1018,13 @@ def download_reveal():
         return "", 400
     if p.exists():
         import subprocess
-        subprocess.run(["open", "-R", str(p)])
+        import sys
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-R", str(p)])
+        elif sys.platform.startswith("win"):
+            subprocess.run(["explorer", "/select,", str(p)])
+        else:
+            subprocess.run(["xdg-open", str(p.parent)])
     return "", 204
 
 
@@ -4229,7 +4235,8 @@ def settings():
             if f.get("language") in ("zh", "en"):
                 cfg.data.setdefault("app", {})["language"] = f["language"]
             cfg.data["scheduler"]["confirm_timeout_sec"] = int(f.get("timeout", 30))
-            cfg.data["transcription"]["primary"] = f.get("primary", "macwhisper_watch_srt")
+            cfg.data["transcription"]["primary"] = f.get(
+                "primary", cfg_mod._DEFAULT_TRANSCRIBER)
             cfg.data["article"]["mode"] = f.get("article_mode", "edited_article")
             cfg.data["article"]["custom_prompt"] = f.get("custom_prompt", "").strip()
             cfg.data["article"]["append_original"] = f.get("append_original") == "1"
@@ -4281,8 +4288,17 @@ def settings():
                 cfg_mod.save(cfg)
                 msg = '<span class=ok>设置已保存</span>'
                 if hours:
-                    from . import scheduler
-                    msg += f' <span class=dim>{escape(scheduler.install(hours))}</span>'
+                    import sys
+                    if sys.platform == "darwin":
+                        from . import scheduler
+                        msg += f' <span class=dim>{escape(scheduler.install(hours))}</span>'
+                    else:
+                        # launchd 定时是 macOS 专属实现（scheduler.py 整个
+                        # 绑死 launchctl/plist），Windows 版这块还没做
+                        # （对应 Windows 该用 Task Scheduler，是后续单独
+                        # 一块工作）——先如实告知，而不是静默假装排上了。
+                        msg += (' <span class=bad>定时任务目前只支持 macOS，'
+                                'Windows 版本请手动点"立即运行"</span>')
             except cfg_mod.ConfigError as e:
                 msg = f'<span class=bad>{escape(str(e))}</span>'
             cfg = cfg_mod.load()

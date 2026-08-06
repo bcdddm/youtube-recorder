@@ -1,0 +1,84 @@
+name: Build Windows
+
+# First Windows build pass — minimum-viable scope: core Flask+webview app
+# only (no tray/scheduler yet, see youtube_recorder/tray.py and scheduler.py
+# docstrings). Runs entirely on GitHub's windows-latest runner since
+# PyInstaller can't cross-compile — a macOS host can never produce a real,
+# verified Windows .exe, it has to actually build (and ideally run the test
+# suite) on Windows itself.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[pipeline,ai,dossier,gui]"
+          pip install pyinstaller pytest
+
+      - name: Run test suite
+        # 每个测试文件单独起一个 pytest 进程——不是随便挑的写法：paths.py
+        # 的 APP_SUPPORT 之类是模块第一次被 import 时就算死的常量，几个
+        # 测试文件各自把 YTREC_HOME 指到自己的临时目录，要是全塞进同一个
+        # pytest 进程跑，后导入的文件设的 YTREC_HOME 改不动已经算好的值，
+        # 会互相污染。分开跑的开销可忽略，换来的是每个文件各自隔离。
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem tests -Filter "test_*.py" | ForEach-Object {
+            Write-Host "=== $($_.Name) ==="
+            python -m pytest $_.FullName -q
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Build
+        shell: pwsh
+        run: ./scripts/build_app_windows.ps1
+
+      - name: Smoke test the packaged exe
+        # 光打包成功不代表真的能跑——PyInstaller 最常见的坑就是漏收了某个
+        # 运行时才 import 的模块，打包时不报错，双击就闪退。--version 走的
+        # 是 argparse 的内置 action，不碰 winapp/webview，也不用真开一个
+        # 窗口（CI 这台机器上有没有 WebView2/能不能起窗口都不影响这一步），
+        # 但只要它能正常打印退出，就说明整个可执行文件里的解释器、
+        # youtube_recorder 包本身、以及它默认就要 import 的那些依赖
+        # （flask/yaml/keyring 等）都是完整能跑起来的。
+        shell: pwsh
+        run: |
+          $exe = "../YouTube Recorder/YouTube Recorder.exe"
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "packaged exe exited $LASTEXITCODE on --version"
+            exit 1
+          }
+
+      - name: Zip build output
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "../YouTube Recorder" `
+            -DestinationPath "../YouTube-Recorder-windows.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Recorder-windows
+          path: YouTube-Recorder-windows.zip
+          retention-days: 14

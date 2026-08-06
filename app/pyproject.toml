@@ -13,6 +13,14 @@ dependencies = [
 pipeline = ["yt-dlp>=2026.1.1"]
 ai = ["anthropic>=0.40", "openai>=1.50"]
 dossier = ["yfinance>=0.2"]
+# 原生窗口壳（winapp.py）——跨平台：macOS 上走 WKWebView，Windows 上走
+# Edge WebView2（系统自带，Win10 1803+/Win11 都有）。
+gui = ["pywebview>=5.0"]
+# 菜单栏托盘常驻（tray.py）目前整个绑死 Cocoa，只有 macOS 能装/能用；
+# Windows 版还没有对应实现（等做了大概会是 pystray），先别在 Windows 上
+# 装这一组，装了也用不上、pip 还会直接装不上。
+macos = ["rumps>=0.4", "pyobjc-framework-Cocoa>=10.0",
+        "pyobjc-framework-WebKit>=10.0", "pyobjc-framework-Quartz>=10.0"]
 
 [project.scripts]
 ytrec = "youtube_recorder.cli:main"

@@ -270,11 +270,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    if not argv and getattr(sys, "frozen", False) and sys.platform == "darwin":
-        # 打包后的 App 被 Finder/`open` 不带参数启动时（比如登录启动项、
-        # 双击图标），默认进菜单栏托盘常驻模式；开窗口走 `open --args app`
-        # 单独传参，见 tray.py 的 open_win()。
-        argv = ["tray"]
+    if not argv and getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            # 打包后的 App 被 Finder/`open` 不带参数启动时（比如登录启动项、
+            # 双击图标），默认进菜单栏托盘常驻模式；开窗口走 `open --args app`
+            # 单独传参，见 tray.py 的 open_win()。
+            argv = ["tray"]
+        else:
+            # Windows（以及以后的 Linux）打包版还没有托盘/开机自启这一层
+            # （tray.py 整个绑死 rumps，是 macOS 专属实现），双击图标就
+            # 直接开原生窗口——不会常驻、关窗口就是退出程序，先把最小可用
+            # 的体验跑通，托盘/后台常驻是下一步。
+            argv = ["app"]
     args = build_parser().parse_args(argv)
     return args.fn(args)
 

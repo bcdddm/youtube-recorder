@@ -52,6 +52,12 @@ def _setup(monkey_feed=True):
     cfg_mod.write_default_if_missing()
     cfg = cfg_mod.load()
     cfg.data["transcription"]["inbox_dir"] = str(Path(_TMP) / "inbox")
+    # 这份测试文件测的是 watchfolder/MacWhisper 那条路径（提交音频到 inbox、
+    # 手动放一个 .srt 模拟被转录完），默认转录方式现在按平台走（Windows/
+    # Linux 默认 openai_audio，见 config.py 的 _default_transcriber）——
+    # 显式钉死在这，测试意图跟宿主机平台脱钩，在 CI 的 Windows runner 上
+    # 跑这份文件也是同一个结果。
+    cfg.data["transcription"]["primary"] = "macwhisper_watch_srt"
     con = dbm.connect()
     dbm.add_channel(con, "UCchan00001", "https://youtube.com/@x", "X",
                     not_before="2026-07-10T00:00:00Z")

@@ -501,6 +501,13 @@ def confirm_dialog(cfg, log, n_new: int) -> bool:
     policy = cfg.get("scheduler.confirm_dialog", "on_new_videos")
     if policy == "never" or (policy == "on_new_videos" and n_new == 0):
         return True
+    import sys
+    if sys.platform != "darwin":
+        # AppleScript 弹窗是 macOS 专属实现（Windows 版还没有对应的原生
+        # 弹窗/托盘常驻，见 tray.py）——没有弹窗可确认，就按跟弹窗出错时
+        # 一样的兜底策略处理，而不是假装弹了窗、用户点了确认。
+        log.event("confirm_dialog_unavailable", detail=f"platform={sys.platform}")
+        return cfg.get("scheduler.on_dialog_error", "run") == "run"
     import subprocess
     timeout = cfg.get("scheduler.confirm_timeout_sec", 30)
     script = (

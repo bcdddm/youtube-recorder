@@ -1245,13 +1245,21 @@ def test_company_page_says_so_when_no_valuation_available():
         points={"observations": ["obs"], "concerns": [], "price_levels": []},
         con=con)
     empty_val = {"forward_pe": None, "trailing_pe": None, "forward_eps": None}
-    with mock.patch.object(dossier, "resolve_ticker", return_value="SOXX"), \
+    # 用一个绝不会命中 BENCHMARK_SOURCES 的假 ticker——之前用真实的 "SOXX"
+    # 时，company_view() 里没打 mock 的 fetch_benchmark_forward_pe(ticker)
+    # 会真的去请求 historyofmarket.com，本地沙盒网络出口受限所以请求失败、
+    # 兜底返回 {}，测试碰巧能过；到了真有公网访问的 Windows CI 上，这个
+    # 请求会真的成功拿到 SOXX 的历史数据，直接换到"这个标的本身就是指数"
+    # 的展示分支，断言的"没有市盈率数据"文案根本不会出现。同时也显式 mock
+    # 掉这个函数，不管以后测试里用什么 ticker 都不会再悄悄发出真实请求。
+    with mock.patch.object(dossier, "resolve_ticker", return_value="ZZFAKE"), \
          mock.patch.object(dossier, "fetch_price_history", return_value=[]), \
-         mock.patch.object(dossier, "fetch_valuation", return_value=empty_val):
+         mock.patch.object(dossier, "fetch_valuation", return_value=empty_val), \
+         mock.patch.object(dossier, "fetch_benchmark_forward_pe", return_value={}):
         r = client.get("/companies/无估值公司")
     assert r.status_code == 200
     body = r.data.decode("utf-8")
-    assert "没有 SOXX 的市盈率数据" in body
+    assert "没有 ZZFAKE 的市盈率数据" in body
     assert "属正常情况" in body
 
 

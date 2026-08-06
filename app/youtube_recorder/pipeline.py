@@ -581,11 +581,17 @@ def _trigger_company_dossier(con, cfg, stats: RunStats, log) -> None:
     同时兜底扫一遍指数/ETF 提及（scan_video_for_index_mentions）——这层
     不依赖 companies 字段，靠固定的别名正则命中标普500/纳斯达克100/
     SOXX/IGV 这几个已登记的指数实体，哪怕某篇文章的 companies 字段没把
-    它们标进去（AI 标注难免有漏），只要正文里提到了就不会漏掉。"""
+    它们标进去（AI 标注难免有漏），只要正文里提到了就不会漏掉。
+
+    dossier.allowed_groups 配置了的话，只处理属于这些组的频道——比如
+    只想让投资相关的频道进公司档案，播客/generalist 频道不进。没配置就
+    跟以前一样不限制。"""
     if not stats.vault_written_ids or not cfg.get("dossier.enabled", False):
         return
     from . import dossier as _dossier
     for vid in stats.vault_written_ids:
+        if not _dossier.video_allowed_for_dossier(cfg, con, vid):
+            continue
         try:
             n = _dossier.process_video_companies(cfg, con, vid, log)
             if n:

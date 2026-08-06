@@ -810,6 +810,29 @@ def channel_name_for_video(con, video_id: str) -> str | None:
     return name or None
 
 
+def channel_groups_for_video(con, video_id: str) -> list[str]:
+    """一个视频所属频道登记的组（channels.grp 是逗号分隔，一个频道可以
+    属于多个组）。查不到频道/没分组就是空列表。"""
+    row = con.execute(
+        "SELECT c.grp FROM videos v JOIN channels c ON c.channel_id=v.channel_id "
+        "WHERE v.video_id=?", (video_id,)).fetchone()
+    raw = (row["grp"] if row else "") or ""
+    return [g.strip() for g in raw.split(",") if g.strip()]
+
+
+def video_allowed_for_dossier(cfg, con, video_id: str) -> bool:
+    """公司档案插件的组访问限制：cfg 里 dossier.allowed_groups 配置了的话
+    （非空列表），只有属于这些组之一的频道，它的视频才会被公司档案插件
+    处理（普通公司抽取 + 指数/ETF 扫描都受这道闸控制）。没配置
+    （空列表/没这个键）就是不限制，所有视频都处理——这是默认行为，跟
+    加这个功能之前完全一样，保证不配置的人不受影响。"""
+    allowed = cfg.get("dossier.allowed_groups") or []
+    if not allowed:
+        return True
+    video_groups = set(channel_groups_for_video(con, video_id))
+    return bool(video_groups & set(allowed))
+
+
 def rescan_all(cfg, con, log=None) -> dict:
     """全量重新扫描：不是增量补跑，是彻底重来一遍。用于抽取格式升级之后
     （比如加了频道前缀、结构化点位）让所有历史数据补齐新字段——不是简单
@@ -864,6 +887,8 @@ def backfill_all(cfg, con, log=None) -> dict:
     companies_processed = 0
     for vid in video_ids:
         scanned += 1
+        if not video_allowed_for_dossier(cfg, con, vid):
+            continue
         try:
             n = process_video_companies(cfg, con, vid, log)
         except Exception as e:
@@ -975,6 +1000,8 @@ def backfill_index_mentions(cfg, con, log=None) -> dict:
     entries_added = 0
     for r in rows:
         scanned += 1
+        if not video_allowed_for_dossier(cfg, con, r["video_id"]):
+            continue
         try:
             n = scan_video_for_index_mentions(cfg, con, r["video_id"], log)
         except Exception as e:

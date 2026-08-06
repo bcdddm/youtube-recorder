@@ -36,11 +36,16 @@ FAKE_JSON = json.dumps({
 
 class _CfgFlag:
     """Minimal cfg stub exposing only .get(), for pipeline-trigger tests."""
-    def __init__(self, enabled=False):
+    def __init__(self, enabled=False, allowed_groups=None):
         self._enabled = enabled
+        self._allowed_groups = allowed_groups or []
 
     def get(self, k, d=None):
-        return self._enabled if k == "dossier.enabled" else d
+        if k == "dossier.enabled":
+            return self._enabled
+        if k == "dossier.allowed_groups":
+            return self._allowed_groups
+        return d
 
 
 # --- db.py: dedup tracking --------------------------------------------------
@@ -404,6 +409,92 @@ def test_trigger_company_dossier_enabled_processes_each_written_id():
     assert m.call_count == 2
     called_ids = [c.args[2] for c in m.call_args_list]
     assert called_ids == ["vidTrig2", "vidTrig3"]
+
+
+def _mk_video_in_group(con, vid, group, chan_uc="UCgrp1"):
+    dbm.add_channel(con, chan_uc, f"https://youtube.com/@{chan_uc}", "分组频道")
+    con.execute("UPDATE channels SET grp=? WHERE channel_id=?", (group, chan_uc))
+    dbm.upsert_discovered(con, vid, chan_uc, "标题", "2026-07-10T00:00:00Z")
+    con.commit()
+
+
+def test_channel_groups_for_video_splits_comma_list():
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpDb1", "投资,美股", chan_uc="UCgrpdb1")
+    assert dossier.channel_groups_for_video(con, "vidGrpDb1") == ["投资", "美股"]
+    assert dossier.channel_groups_for_video(con, "vid-not-exist") == []
+
+
+def test_video_allowed_for_dossier_no_restriction_by_default():
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpDb2", "美股", chan_uc="UCgrpdb2")
+    assert dossier.video_allowed_for_dossier(_CfgFlag(), con, "vidGrpDb2") is True
+    assert dossier.video_allowed_for_dossier(
+        _CfgFlag(allowed_groups=[]), con, "vidGrpDb2") is True
+
+
+def test_video_allowed_for_dossier_respects_allowed_groups():
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpDb3", "投资,美股", chan_uc="UCgrpdb3")
+    _mk_video_in_group(con, "vidGrpDb4", "游戏", chan_uc="UCgrpdb4")
+    cfg = _CfgFlag(allowed_groups=["美股", "财经"])
+    assert dossier.video_allowed_for_dossier(cfg, con, "vidGrpDb3") is True   # 交集非空
+    assert dossier.video_allowed_for_dossier(cfg, con, "vidGrpDb4") is False  # 无交集
+    # 没分组的频道，配了限制之后一律不通过（不属于任何允许的组）
+    _mk_video_in_group(con, "vidGrpDb5", "", chan_uc="UCgrpdb5")
+    assert dossier.video_allowed_for_dossier(cfg, con, "vidGrpDb5") is False
+
+
+def test_trigger_company_dossier_skips_video_outside_allowed_groups():
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpHook1", "游戏", chan_uc="UCgrphook1")
+    log = RunLogger()
+    stats = pipeline.RunStats()
+    stats.vault_written_ids = ["vidGrpHook1"]
+    cfg = _CfgFlag(enabled=True, allowed_groups=["美股"])
+    with mock.patch.object(dossier, "process_video_companies") as m, \
+         mock.patch.object(dossier, "scan_video_for_index_mentions") as m2:
+        pipeline._trigger_company_dossier(con, cfg, stats, log)
+    m.assert_not_called()
+    m2.assert_not_called()
+
+
+def test_trigger_company_dossier_processes_video_inside_allowed_groups():
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpHook2", "美股,投资", chan_uc="UCgrphook2")
+    log = RunLogger()
+    stats = pipeline.RunStats()
+    stats.vault_written_ids = ["vidGrpHook2"]
+    cfg = _CfgFlag(enabled=True, allowed_groups=["美股"])
+    with mock.patch.object(dossier, "process_video_companies", return_value=0) as m:
+        pipeline._trigger_company_dossier(con, cfg, stats, log)
+    m.assert_called_once()
+
+
+def test_backfill_all_and_index_mentions_respect_allowed_groups():
+    """全量补跑（不只是新文章钩子）也要认这道组限制——不然"只想扫某个组"
+    的用户跑一次全量重扫又会把不想要的组扫进去。"""
+    con = dbm.connect()
+    _mk_video_in_group(con, "vidGrpBf1", "美股", chan_uc="UCgrpbf1")
+    _mk_video_in_group(con, "vidGrpBf2", "游戏", chan_uc="UCgrpbf2")
+    con.execute("INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+               ("vidGrpBf1", "wiki", "/fake/30-Wiki/x--vidGrpBf1.md", dbm.now()))
+    con.execute("INSERT INTO writes(video_id, note_kind, note_path, at) VALUES (?,?,?,?)",
+               ("vidGrpBf2", "wiki", "/fake/30-Wiki/y--vidGrpBf2.md", dbm.now()))
+    con.commit()
+    cfg = _CfgFlag(allowed_groups=["美股"])
+
+    with mock.patch.object(dossier, "process_video_companies", return_value=0) as m:
+        dossier.backfill_all(cfg, con)
+    called_ids = {c.args[2] for c in m.call_args_list}
+    assert "vidGrpBf1" in called_ids
+    assert "vidGrpBf2" not in called_ids
+
+    with mock.patch.object(dossier, "scan_video_for_index_mentions", return_value=0) as m2:
+        dossier.backfill_index_mentions(cfg, con)
+    called_ids2 = {c.args[2] for c in m2.call_args_list}
+    assert "vidGrpBf1" in called_ids2
+    assert "vidGrpBf2" not in called_ids2
 
 
 def test_trigger_company_dossier_swallows_per_video_errors():
@@ -2025,6 +2116,79 @@ def test_non_pinned_company_does_not_auto_generate_summary():
         n = dossier.process_video_companies(_Cfg(), con, "vidPinAuto2")
     assert n == 1
     assert dbm.dossier_get_summary(con, "非置顶自动总结测试公司") is None
+
+
+# --- GUI: module toggle + group restriction moved to /api "模组" card ------
+
+def test_api_page_shows_modules_card_with_dossier_toggle_and_groups():
+    from youtube_recorder import gui
+    con = dbm.connect()
+    dbm.add_channel(con, "UCmodcard1", "https://youtube.com/@modcard1", "模组测试频道")
+    con.execute("UPDATE channels SET grp='美股,投资' WHERE channel_id='UCmodcard1'")
+    con.commit()
+    body = gui.app.test_client().get("/api").get_data(as_text=True)
+    assert "模组" in body
+    assert "公司档案插件" in body
+    assert 'name=form value=modules' in body
+    assert 'name=dossier_on' in body
+    assert 'name=allowed_group' in body
+    assert "美股" in body and "投资" in body
+
+
+def test_api_page_saves_module_settings():
+    from youtube_recorder import gui
+    con = dbm.connect()
+    dbm.add_channel(con, "UCmodcard2", "https://youtube.com/@modcard2", "模组测试频道2")
+    con.execute("UPDATE channels SET grp='美股' WHERE channel_id='UCmodcard2'")
+    con.commit()
+    cli = gui.app.test_client()
+    r = cli.post("/api", data={"_csrf": gui.CSRF, "form": "modules",
+                               "dossier_on": "1", "allowed_group": "美股"})
+    assert r.status_code == 200
+    cfg = cfg_mod.load()
+    assert cfg.get("dossier.enabled") is True
+    assert cfg.get("dossier.allowed_groups") == ["美股"]
+
+
+def test_api_page_no_group_checked_means_unrestricted():
+    from youtube_recorder import gui
+    cli = gui.app.test_client()
+    r = cli.post("/api", data={"_csrf": gui.CSRF, "form": "modules", "dossier_on": "1"})
+    assert r.status_code == 200
+    cfg = cfg_mod.load()
+    assert cfg.get("dossier.allowed_groups") == []
+
+
+def test_api_page_unchecking_dossier_disables_it():
+    from youtube_recorder import gui
+    cli = gui.app.test_client()
+    cli.post("/api", data={"_csrf": gui.CSRF, "form": "modules", "dossier_on": "1"})
+    assert cfg_mod.load().get("dossier.enabled") is True
+    # 表单里没有 dossier_on（等同于取消勾选）应该把它关掉
+    cli.post("/api", data={"_csrf": gui.CSRF, "form": "modules"})
+    assert cfg_mod.load().get("dossier.enabled") is False
+
+
+def test_settings_page_no_longer_has_inline_dossier_checkbox():
+    from youtube_recorder import gui
+    body = gui.app.test_client().get("/settings").get_data(as_text=True)
+    assert "name=dossier_on" not in body
+    assert "API 和模组" in body
+    assert "公司档案插件" in body        # 指路文字还在，只是没有表单控件了
+
+
+def test_settings_general_save_does_not_reset_dossier_flag():
+    """回归测试：以前公司档案开关内嵌在 Settings 大表单里，任何一次保存
+    Settings（哪怕表单里根本没勾选框）都会把它悄悄重置成关闭。挪到 /api
+    的独立表单之后，Settings 的通用保存不应该再碰这个字段。"""
+    from youtube_recorder import gui
+    cli = gui.app.test_client()
+    cli.post("/api", data={"_csrf": gui.CSRF, "form": "modules", "dossier_on": "1"})
+    assert cfg_mod.load().get("dossier.enabled") is True
+
+    r = cli.post("/settings", data={"_csrf": gui.CSRF})   # 通用表单，无 form 字段
+    assert r.status_code == 200
+    assert cfg_mod.load().get("dossier.enabled") is True   # 没被顺带关掉
 
 
 if __name__ == "__main__":

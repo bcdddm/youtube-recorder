@@ -216,7 +216,7 @@ BASE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
  ::-webkit-scrollbar-track{background:transparent}
 </style></head><body>
 <nav>
- {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('download','Download'),('api','API'),('settings','Settings')] %}
+ {% for p,l in [('channels','Channels'),('queue','Queue'),('reports','Reports'),('download','Download'),('api','API 和模组'),('settings','Settings')] %}
  <a href="/{{p}}" class="{{'on' if page==p else ''}}">{{l}}</a>{% endfor %}
  {% if dossier_on %}<a href="/companies" class="{{'on' if page=='companies' else ''}}">公司档案</a>{% endif %}
  <a href=https://github.com/bcdddm/youtube-recorder/issues style='color:var(--dim);padding:4px 8px;text-decoration:none' title=GitHub反馈>💬 反馈</a><button id=themebtn style="margin-left:auto;border:none;background:transparent;color:var(--dim);padding:4px 8px;display:flex;align-items:center"></button>
@@ -3037,6 +3037,11 @@ def _key_status(name: str) -> bool:
 def api_page():
     cfg = cfg_mod.load()
     esc = lambda v: str(escape(v))
+    con_g0 = _con()
+    _all_gs = sorted({x.strip() for (row,) in con_g0.execute(
+        "SELECT grp FROM channels WHERE grp IS NOT NULL AND grp!=''").fetchall()
+        for x in (row or "").split(",") if x.strip()})
+    con_g0.close()
     msg = ''
     mres = request.args.get('models', '')
     if mres.startswith('err:'):
@@ -3086,6 +3091,15 @@ def api_page():
             cfg.data.setdefault('groups', {})['prompts'] = gpm
             try:
                 cfg_mod.save(cfg); msg = '<span class=ok>组个性化已保存</span>'
+            except cfg_mod.ConfigError as e:
+                msg = '<span class=bad>' + esc(str(e)) + '</span>'
+            cfg = cfg_mod.load()
+        elif f.get('form') == 'modules':
+            cfg.data.setdefault('dossier', {})['enabled'] = f.get('dossier_on') == '1'
+            allowed = [g.strip() for g in f.getlist('allowed_group') if g.strip()]
+            cfg.data['dossier']['allowed_groups'] = allowed
+            try:
+                cfg_mod.save(cfg); msg = '<span class=ok>模组设置已保存</span>'
             except cfg_mod.ConfigError as e:
                 msg = '<span class=bad>' + esc(str(e)) + '</span>'
             cfg = cfg_mod.load()
@@ -3142,12 +3156,32 @@ def api_page():
     p.append('<tr><td>用哪个密钥</td><td><input name=audio_key value=' + chr(39) + a_key + chr(39) + ' style=width:40%> <span class=dim>对应钥匙串 ytrec-该名，如 openai / siliconflow</span></td></tr>')
     p.append('<tr><td>转录模型</td><td><input name=api_model value=' + chr(39) + a_model + chr(39) + ' style=width:60%> <span class=dim>如 whisper-1 或 FunAudioLLM/SenseVoiceSmall</span></td></tr>')
     p.append('</table><p><button class=primary>保存转录接口</button></p></form></div>')
+    # 模组：默认关闭的可选功能，独立开关 + 可选的组访问限制
+    _dossier_on = bool(cfg.get('dossier.enabled'))
+    _allowed_groups = set(cfg.get('dossier.allowed_groups') or [])
+    p.append('<div class=card><h3>模组</h3>')
+    p.append('<p class=dim>默认关闭的可选功能，用完再关，不影响主流程。</p>')
+    p.append('<form method=post><input type=hidden name=_csrf value=' + CSRF
+             + '><input type=hidden name=form value=modules>')
+    p.append('<p><label><input type=checkbox name=dossier_on value=1 '
+             + ('checked' if _dossier_on else '') + '> <b>公司档案插件</b></label></p>')
+    p.append('<p class=dim>开启后每篇新文章写入库里时，会顺带把它提到的公司/实体'
+             '增量抽取「观点评价」「关注点」「推荐点位」，写进 50-公司档案/&lt;公司名&gt;.md'
+             '（按公司名建档，新信息持续追加进同一篇笔记，不会新建或覆盖），每条都标注来源'
+             '文章。开启后导航栏会出现"公司档案"入口。</p>')
+    p.append('<p><b>允许访问的频道组</b>'
+             '<span class=dim>（只处理属于这些组的频道；不勾选任何一个 = 不限制，处理所有频道）</span></p>')
+    if not _all_gs:
+        p.append('<p class=dim>还没有任何组——先在 Channels 页给频道分组，'
+                 '不设组的话公司档案插件默认处理所有频道。</p>')
+    else:
+        p.append('<p>' + ''.join(
+            '<label style="margin-right:14px;white-space:nowrap">'
+            '<input type=checkbox name=allowed_group value=' + chr(39) + esc(g) + chr(39)
+            + (' checked' if g in _allowed_groups else '') + '> ' + esc(g) + '</label>'
+            for g in _all_gs) + '</p>')
+    p.append('<button class=primary>保存模组设置</button></form></div>')
     # 基于组的总结和改写个性化
-    con_g = _con()
-    _all_gs = sorted({x.strip() for (row,) in con_g.execute(
-        "SELECT grp FROM channels WHERE grp IS NOT NULL AND grp!=''").fetchall()
-        for x in (row or "").split(",") if x.strip()})
-    con_g.close()
     _gpm = cfg.get('groups.prompts') or {}
     p.append('<div class=card><h3>基于组的总结和改写个性化</h3>')
     p.append('<p class=dim>给每个组一条 prompt：该组频道的<b>单篇改写</b>和含该组文章的'
@@ -3166,7 +3200,7 @@ def api_page():
                      'placeholder="例：偏重政策与宏观影响；结尾给出对该主题的跟踪建议">'
                      + esc(_gpm.get(g, '')) + '</textarea></p>')
         p.append('<button class=primary>保存组个性化</button></form></div>')
-    return page('API', 'api', ''.join(p))
+    return page('API 和模组', 'api', ''.join(p))
 
 
 # --- Company Dossier (公司档案插件，默认关闭，见 config.dossier.enabled) --------
@@ -4209,7 +4243,6 @@ def settings():
                 pass
             cfg.data["visuals"]["image_density"] = int(f.get("density", 3))
             cfg.data["visuals"]["enabled"] = f.get("visuals_on") == "1"
-            cfg.data.setdefault("dossier", {})["enabled"] = f.get("dossier_on") == "1"
             cfg.data["vault"]["root"] = f.get("vault_root", "").strip()
             layout = f.get("layout", "vault")
             if layout in ("vault", "folder_split", "folder_flat"):
@@ -4407,12 +4440,8 @@ def settings():
  placeholder="相对根目录，如 30-Wiki">
 &nbsp;<label><input type=checkbox name=migrate_reports value=1 checked>
  修改时把现有文章迁移过去</label></td></tr>
-<tr><td>公司档案插件</td><td><label><input type=checkbox name=dossier_on value=1
- {'checked' if cfg.get('dossier.enabled') else ''}> 启用</label>
- <p class=dim>默认关闭。开启后每篇新文章写入库里时，会顺带把它提到的公司/实体
- 增量抽取「观点评价」「关注点」「推荐点位」，写进 50-公司档案/&lt;公司名&gt;.md
- （按公司名建档，新信息持续追加进同一篇笔记，不会新建或覆盖），每条都标注来源
- 文章。开启后导航栏会出现"公司档案"入口。</p></td></tr>
+<tr><td>公司档案插件</td><td><p class=dim>已移到 <a href=/api>API 和模组</a> 页的
+ 「模组」卡片——同一个地方还能设置只允许哪些频道组的内容进这个插件。</p></td></tr>
 </table>
 <p><button class=primary>保存全部设置</button></p></div>
 </form>
@@ -4432,7 +4461,7 @@ def settings():
 <button>保存</button>
 </form></div>
 
-<div class=card><h3>⑥ AI / API</h3><p class=dim>AI 凭证与分工、Qwen/Kimi、语音识别接口已移到独立的 <a href=/api>API 页</a>，让设置更清爽。</p></div>"""
+<div class=card><h3>⑥ AI / API</h3><p class=dim>AI 凭证与分工、Qwen/Kimi、语音识别接口、可选模组已移到独立的 <a href=/api>API 和模组页</a>，让设置更清爽。</p></div>"""
     return page("设置", "settings", body)
 
 

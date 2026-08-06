@@ -1028,6 +1028,133 @@ def test_company_page_says_so_when_no_valuation_available():
     assert "属正常情况" in body
 
 
+def _hist(pairs):
+    return [{"date": d, "close": c} for d, c in pairs]
+
+
+def test_fetch_pe_history_builds_line_from_annual_eps():
+    hist = _hist([("2025-06-01", 100.0), ("2026-01-05", 120.0),
+                 ("2026-06-01", 150.0)])
+    eps = [("2024-12-31", 5.0), ("2025-12-31", 10.0)]
+    dossier._PE_HISTORY_CACHE.clear()
+    with mock.patch.object(dossier, "_annual_eps_timeline", return_value=eps):
+        out = dossier.fetch_pe_history("X", hist, trailing_pe=15.0)
+    # 2025-06-01 用 2024 财年 EPS 5 -> 20；之后用 2025 财年 EPS 10
+    assert out == [{"date": "2025-06-01", "pe": 20.0},
+                   {"date": "2026-01-05", "pe": 12.0},
+                   {"date": "2026-06-01", "pe": 15.0}]
+
+
+def test_fetch_pe_history_skips_loss_years_leaving_a_gap():
+    """亏损年份没有市盈率，应该断开而不是画个负数或硬连过去。"""
+    hist = _hist([("2024-06-01", 50.0), ("2025-06-01", 60.0),
+                 ("2026-06-01", 70.0)])
+    eps = [("2023-12-31", 5.0), ("2024-12-31", -2.0), ("2025-12-31", 7.0)]
+    dossier._PE_HISTORY_CACHE.clear()
+    with mock.patch.object(dossier, "_annual_eps_timeline", return_value=eps):
+        out = dossier.fetch_pe_history("X", hist, trailing_pe=10.0)
+    dates = [p["date"] for p in out]
+    assert "2025-06-01" not in dates          # 该点落在亏损年，跳过
+    assert dates == ["2024-06-01", "2026-06-01"]
+
+
+def test_fetch_pe_history_rejects_adr_currency_mismatch():
+    """台积电式的陷阱：股价是美元、财报 EPS 是台币，算出来会是 1.2 倍
+    而不是 36 倍。这种整条线都不能要。"""
+    hist = _hist([("2026-06-01", 300.0)])     # 美元股价
+    eps = [("2025-12-31", 331.25)]            # 台币 EPS
+    dossier._PE_HISTORY_CACHE.clear()
+    with mock.patch.object(dossier, "_annual_eps_timeline", return_value=eps):
+        out = dossier.fetch_pe_history("TSM", hist, trailing_pe=36.5)
+    assert out == []                           # 0.9 vs 36.5，差太远，整条丢掉
+
+
+def test_fetch_pe_history_accepts_reasonable_drift_from_yahoo():
+    """自算值和雅虎的 trailingPE 有点差是正常的（我们用年度 EPS、雅虎用
+    滚动四季度），只要在 0.5~2 倍之间就照画。"""
+    hist = _hist([("2026-06-01", 375.0)])
+    eps = [("2025-12-31", 7.87)]               # -> 47.6
+    dossier._PE_HISTORY_CACHE.clear()
+    with mock.patch.object(dossier, "_annual_eps_timeline", return_value=eps):
+        out = dossier.fetch_pe_history("ISRG", hist, trailing_pe=42.2)
+    assert len(out) == 1 and out[0]["pe"] == 47.65
+
+
+def test_fetch_pe_history_empty_when_no_eps_available():
+    """ETF 没有 EPS，拿不到就返回空，页面那边不画线。"""
+    dossier._PE_HISTORY_CACHE.clear()
+    with mock.patch.object(dossier, "_annual_eps_timeline", return_value=[]):
+        out = dossier.fetch_pe_history("SOXX", _hist([("2026-06-01", 300.0)]), 37.5)
+    assert out == []
+
+
+def test_company_page_renders_pe_history_chart():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-pechart"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "PE走势公司", video_id="vc-pe", published="2026-07-01T00:00:00Z",
+        channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=con)
+    fake_hist = _hist([("2026-06-01", 300.0), ("2026-07-01", 375.0)])
+    fake_val = {"forward_pe": 31.08, "trailing_pe": 42.2, "forward_eps": 12.07}
+    fake_pe = [{"date": "2026-06-01", "pe": 38.0},
+              {"date": "2026-07-01", "pe": 47.65}]
+    with mock.patch.object(dossier, "resolve_ticker", return_value="ISRG"), \
+         mock.patch.object(dossier, "fetch_price_history", return_value=fake_hist), \
+         mock.patch.object(dossier, "fetch_valuation", return_value=fake_val), \
+         mock.patch.object(dossier, "fetch_pe_history", return_value=fake_pe):
+        r = client.get("/companies/PE走势公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "静态市盈率走势" in body
+    assert "pechart_ISRG" in body
+    assert "47.65" in body and "38.0" in body
+    assert "期间均值" in body and "42.83" in body        # (38.0+47.65)/2
+    assert "当前动态市盈率 " in body and "31.08" in body   # 虚线参考
+    assert "财年交界处会有台阶" in body                    # 口径限制要说清楚
+
+
+def test_company_page_explains_when_pe_line_cannot_be_drawn():
+    from youtube_recorder import gui
+    client = gui.app.test_client()
+
+    gvault = Path(_TMP) / "vault-gui-nopeline"
+    gvault.mkdir(parents=True, exist_ok=True)
+    cfg = cfg_mod.load()
+    cfg.data["vault"]["root"] = str(gvault)
+    cfg.data.setdefault("dossier", {})["enabled"] = True
+    cfg_mod.save(cfg)
+
+    con = dbm.connect()
+    dossier.append_dossier_entries(
+        gvault, "无PE线公司", video_id="vc-nopeline",
+        published="2026-07-01T00:00:00Z", channel="X", source_link="[[n]]",
+        points={"observations": ["obs"], "concerns": [], "price_levels": []},
+        con=con)
+    fake_val = {"forward_pe": None, "trailing_pe": 36.5, "forward_eps": None}
+    with mock.patch.object(dossier, "resolve_ticker", return_value="TSM"), \
+         mock.patch.object(dossier, "fetch_price_history",
+                          return_value=_hist([("2026-07-01", 300.0)])), \
+         mock.patch.object(dossier, "fetch_valuation", return_value=fake_val), \
+         mock.patch.object(dossier, "fetch_pe_history", return_value=[]):
+        r = client.get("/companies/无PE线公司")
+    assert r.status_code == 200
+    body = r.data.decode("utf-8")
+    assert "静态市盈率走势" not in body
+    assert "画不出市盈率走势线" in body
+    assert "ADR" in body                       # 说明为什么画不出来
+
+
 def test_dossier_chart_click_popup_lets_you_delete_a_point():
     from youtube_recorder import gui
     import re, html as _html, json as _json

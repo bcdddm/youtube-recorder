@@ -3478,9 +3478,12 @@ def company_view(name: str):
     levels, excluded = _dossier.filter_price_level_outliers(raw_levels, reference)
 
     chart_html = _dossier_chart_html(name, ticker, history, levels)
+    _val = _dossier.fetch_valuation(ticker) if ticker else None
+    _pe_hist = (_dossier.fetch_pe_history(ticker, history,
+                                          (_val or {}).get("trailing_pe"))
+                if ticker and history else [])
     valuation_html = _dossier_valuation_html(
-        ticker, _dossier.fetch_valuation(ticker) if ticker else None,
-        history[-1]["close"] if history else None)
+        ticker, _val, history[-1]["close"] if history else None, _pe_hist)
 
     outlier_note = ""
     if excluded:
@@ -3523,8 +3526,66 @@ def company_view(name: str):
     return page(name, "companies", body)
 
 
+def _dossier_pe_chart_html(ticker: str, pe_hist: list[dict],
+                           forward_pe: float | None) -> str:
+    """静态市盈率历史折线 + 当前动态市盈率的水平参考线。
+
+    只有一条历史线（静态 PE），因为历史的"动态市盈率"需要每个历史时点
+    上的分析师一致预期，那是彭博/FactSet 的付费数据，免费源拿不到；
+    动态市盈率只有"当前"这一个值，所以画成一条横的参考线。"""
+    if not pe_hist:
+        return ""
+    import json as _json
+    cid = "pechart_" + "".join(c for c in ticker if c.isalnum())[:20]
+    pes = [p["pe"] for p in pe_hist]
+    avg = round(sum(pes) / len(pes), 2)
+    data_json = escape(_json.dumps({
+        "labels": [p["date"] for p in pe_hist],
+        "pe": pes, "avg": avg, "forward": forward_pe,
+    }, ensure_ascii=False))
+    fwd_note = (f'，虚线是当前动态市盈率 {forward_pe}' if forward_pe else "")
+    return f"""<div style="margin-top:14px">
+<div class=dim style="font-size:.85em;margin-bottom:6px">静态市盈率走势（近 5 年）——
+点线是 {len(pe_hist)} 个交易日的静态市盈率，横线是这段期间的均值 {avg}{fwd_note}。
+EPS 按最近一个已公布财年计，所以线在财年交界处会有台阶；亏损年份没有市盈率，线会断开。</div>
+<canvas id="{cid}" height="70" data-pe="{data_json}"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+(function(){{
+  var el = document.getElementById("{cid}");
+  if (!el || typeof Chart === "undefined") return;
+  var d = JSON.parse(el.dataset.pe);
+  var ds = [
+    {{label: "静态市盈率", data: d.pe, borderColor: "#9ece6a",
+      pointRadius: 0, borderWidth: 1.6, tension: 0.15}},
+    {{label: "期间均值 " + d.avg, data: d.labels.map(function(){{ return d.avg; }}),
+      borderColor: "#6b6b73", borderWidth: 1, pointRadius: 0, tension: 0}}
+  ];
+  if (d.forward !== null && d.forward !== undefined) {{
+    ds.push({{label: "当前动态市盈率 " + d.forward,
+      data: d.labels.map(function(){{ return d.forward; }}),
+      borderColor: "#e0a458", borderDash: [6, 4], borderWidth: 1.5,
+      pointRadius: 0, tension: 0}});
+  }}
+  new Chart(el, {{
+    type: "line", data: {{labels: d.labels, datasets: ds}},
+    options: {{
+      responsive: true,
+      interaction: {{mode: "nearest", intersect: false}},
+      plugins: {{tooltip: {{callbacks: {{label: function(ctx){{
+        if (ctx.dataset.label === "静态市盈率") return "静态市盈率 " + ctx.raw;
+        return ctx.dataset.label;
+      }}}}}}}},
+      scales: {{x: {{ticks: {{maxTicksLimit: 8}}}}}}
+    }}
+  }});
+}})();
+</script></div>"""
+
+
 def _dossier_valuation_html(ticker: str | None, val: dict | None,
-                            current_price: float | None) -> str:
+                            current_price: float | None,
+                            pe_hist: list[dict] | None = None) -> str:
     """估值小卡片：动态市盈率（远期 PE）+ 静态市盈率（TTM）+ 一致预期 EPS。
 
     数据全部来自雅虎财经（yfinance），不需要额外 API key、不花钱。覆盖上
@@ -3565,10 +3626,19 @@ def _dossier_valuation_html(ticker: str | None, val: dict | None,
         elif fwd > ttm:
             cheap_note = ('<span class=dim style="font-size:.85em">'
                          '动态高于静态 = 市场预期盈利会下滑</span>')
+    pe_chart = _dossier_pe_chart_html(ticker, pe_hist or [], fwd)
+    no_line_note = ""
+    if not pe_chart:
+        no_line_note = ('<div class=dim style="margin-top:10px;font-size:.8em">'
+                       '（画不出市盈率走势线：免费源只有 4~5 个年度 EPS，'
+                       '且这只标的的 EPS 口径和股价对不上——最常见的是 ADR '
+                       '用美元报价、财报 EPS 用当地货币——与其画一条错的线，'
+                       '不如不画。）</div>')
     return (f'<div class=card><h3>估值（{escape(ticker)}）</h3>'
             f'<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start">'
             f'{"".join(cells)}</div>'
             f'<div style="margin-top:8px">{cheap_note}</div>'
+            f'{pe_chart}{no_line_note}'
             f'<div class=dim style="margin-top:4px;font-size:.75em">'
             f'来源：雅虎财经 · 缓存 1 小时</div></div>')
 

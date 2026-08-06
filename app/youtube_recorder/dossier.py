@@ -400,6 +400,88 @@ def fetch_valuation(ticker: str) -> dict:
     return out
 
 
+_PE_HISTORY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_PE_HISTORY_TTL_SEC = 3600
+# 自算的最新市盈率必须落在雅虎自己报的 trailingPE 的这个倍数区间内，
+# 否则认为我们的 EPS 口径和价格对不上（最典型的是 ADR：价格是美元、
+# 财报 EPS 是当地货币，比如台积电算出来会是 1.25 倍而不是 36 倍），
+# 这种情况宁可不画，也不能画一条错的线。
+_PE_SANITY_LO, _PE_SANITY_HI = 0.5, 2.0
+
+
+def _annual_eps_timeline(ticker: str) -> list[tuple[str, float]]:
+    """[(财年结束日, 稀释EPS), ...] 由旧到新。雅虎只给 4~5 个年度。"""
+    import math
+    try:
+        import yfinance as yf
+        a = yf.Ticker(ticker).income_stmt
+    except Exception:
+        return []
+    if a is None or getattr(a, "empty", True):
+        return []
+    row = next((r for r in a.index if str(r) == "Diluted EPS"), None)
+    if row is None:
+        return []
+    out: list[tuple[str, float]] = []
+    for col in a.columns:
+        try:
+            v = float(a.loc[row, col])
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(v):
+            continue
+        out.append((str(col)[:10], round(v, 4)))
+    out.sort()
+    return out
+
+
+def fetch_pe_history(ticker: str, history: list[dict],
+                     trailing_pe: float | None = None) -> list[dict]:
+    """按 收盘价 ÷ 最近一个已公布财年的稀释 EPS 算一条静态市盈率历史线，
+    返回 [{"date":..., "pe":...}, ...]。
+
+    为什么是"最近已公布财年 EPS"而不是真正的 TTM：雅虎免费接口只给 4~5
+    个季度的季度 EPS，凑不出足够多的滚动四季度点来画线；年度 EPS 有 4~5
+    年，配上日线价格就能画出一条像样的曲线，代价是 EPS 在财年边界上是
+    跳变的（所以线上会有台阶，这是真实的口径限制，不是 bug）。
+
+    亏损年份（EPS<=0）没有市盈率可言，直接跳过，线会断开而不是硬连。
+
+    最后有一道体检：把自算的最新值和雅虎自己报的 trailingPE 比一比，差
+    出 2 倍以上就整条不返回。这道闸主要挡的是 ADR 的货币错配——台积电
+    价格按美元、EPS 按台币，算出来是 1.25 倍而不是 36 倍——与其画一条
+    错的线，不如不画。"""
+    import time
+    if not history:
+        return []
+    cache_key = f"{ticker}|{history[-1]['date']}|{trailing_pe}"
+    hit = _PE_HISTORY_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < _PE_HISTORY_TTL_SEC:
+        return hit[1]
+
+    eps = _annual_eps_timeline(ticker)
+    out: list[dict] = []
+    if eps:
+        for h in history:
+            d, close = h["date"], h["close"]
+            e = None
+            for period_end, val in eps:
+                if period_end <= d:
+                    e = val
+            if e is None or e <= 0:
+                continue
+            pe = close / e
+            if 0 < pe < 1000:
+                out.append({"date": d, "pe": round(pe, 2)})
+    # 体检：口径对不上就整条丢掉
+    if out and trailing_pe:
+        ratio = out[-1]["pe"] / trailing_pe
+        if not (_PE_SANITY_LO <= ratio <= _PE_SANITY_HI):
+            out = []
+    _PE_HISTORY_CACHE[cache_key] = (time.time(), out)
+    return out
+
+
 _OBS_LINE_RE = re.compile(
     r"^- \[(\d{4}-\d{2}-\d{2})\] (.*?)（来源：(?:(.+?) · )?\[\[([^\]]+)\]\]）$")
 

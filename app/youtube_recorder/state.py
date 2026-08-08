@@ -43,7 +43,18 @@ TRANSITIONS: dict[str, tuple[str, ...]] = {
     DISCOVERED: (METADATA_READY, IGNORED, FAILED),
     METADATA_READY: (CAPTION_CHECK, IGNORED, FAILED),
     CAPTION_CHECK: (TRANSCRIPT_READY, AUDIO_QUEUED, IGNORED, FAILED),
-    AUDIO_QUEUED: (AWAITING_TRANSCRIPTION, IGNORED, FAILED),
+    # AWAITING_TRANSCRIPTION 是 MacWhisper 监视文件夹那条异步路径专属的中间
+    # 状态；primary=openai_audio/faster_whisper 是同步直接调用（API 请求或
+    # 本地模型跑完就有结果，没有"投稿等回收"这一步），处理完就该直接进
+    # TRANSCRIPT_READY——这里之前漏了这条边，pipeline.py 里
+    # _openai_transcribe/_local_whisper_transcribe 调用的
+    # _set(con, vid, st.TRANSCRIPT_READY) 会被 guard_transition 拒绝、
+    # 又被 _set() 自己的 try/except TransitionError 悄悄吞掉（返回 False
+    # 但两个调用方都没检查这个返回值），导致视频卡在 audio_queued 不动，
+    # 且没有任何报错——写 faster_whisper 的 pipeline 分派测试时才第一次
+    # 真正跑通这条路径，暴露出这是个从 openai_audio 那条路径就一直存在、
+    # 从来没被测试覆盖到的潜伏 bug。
+    AUDIO_QUEUED: (AWAITING_TRANSCRIPTION, TRANSCRIPT_READY, IGNORED, FAILED),
     AWAITING_TRANSCRIPTION: (TRANSCRIPT_READY, IGNORED, FAILED),
     TRANSCRIPT_READY: (ARTICLE_READY, VISUAL_PLANNED, PACKAGE_READY, IGNORED, FAILED),
     ARTICLE_READY: (VISUAL_PLANNED, PACKAGE_READY, IGNORED, FAILED),

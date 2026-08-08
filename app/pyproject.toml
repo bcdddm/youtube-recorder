@@ -29,6 +29,11 @@ gui = ["pywebview>=5.0"]
 # 装这一组，装了也用不上、pip 还会直接装不上。
 macos = ["rumps>=0.4", "pyobjc-framework-Cocoa>=10.0",
         "pyobjc-framework-WebKit>=10.0", "pyobjc-framework-Quartz>=10.0"]
+# faster_whisper_backend.py 用的本地识别引擎——纯 pip 包（CTranslate2），
+# macOS/Windows/Linux 都能装，跟 macos 组那种平台专属依赖不是一回事。
+# 单独拆一组是因为它比较重（ctranslate2 + 模型权重体积不小）且是可选项：
+# 装了云端 key 或用 MacWhisper 的用户不需要它。
+local-whisper = ["faster-whisper>=1.0"]
 
 [project.scripts]
 ytrec = "youtube_recorder.cli:main"

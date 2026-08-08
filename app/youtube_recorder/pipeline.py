@@ -190,6 +190,12 @@ def process_audio_queue(con, cfg, log, stats: RunStats) -> None:
             else:
                 dbm.end_attempt(con, aid, "error", error_code="openai_audio")
             continue
+        if cfg.get("transcription.primary") == "faster_whisper":
+            if _local_whisper_transcribe(con, cfg, log, stats, vid, res.path):
+                dbm.end_attempt(con, aid, "ok", detail="faster_whisper")
+            else:
+                dbm.end_attempt(con, aid, "error", error_code="faster_whisper")
+            continue
         wf.submit_audio(res.path, cfg.inbox_dir)
         _set(con, vid, st.AWAITING_TRANSCRIPTION)
         stats.submitted_to_watchfolder += 1
@@ -246,6 +252,27 @@ def _openai_transcribe(con, cfg, log, stats, vid: str, audio_path: Path,
     _set(con, vid, st.TRANSCRIPT_READY)
     stats.transcripts_collected += 1
     log.event("transcript_openai", video_id=vid, detail=dest.name)
+    return True
+
+
+def _local_whisper_transcribe(con, cfg, log, stats, vid: str,
+                              audio_path: Path) -> bool:
+    """primary=faster_whisper：本地跑 faster-whisper，不碰网络/watchfolder。
+    跟 _openai_transcribe 是同一套失败分类/状态流转，只是换了适配器模块。"""
+    from . import faster_whisper_backend as fw
+    v = dbm.get_video(con, vid)
+    try:
+        dest = fw.transcribe(cfg, con, vid, audio_path,
+                             float(v["duration_sec"] or 0) or 1.0,
+                             work_dir(vid))
+    except fw.FasterWhisperError as e:
+        kind = st.RETRY_TRANSIENT if e.transient else st.RETRY_RESOURCE
+        _fail(con, log, stats, vid, st.AUDIO_QUEUED, kind, str(e))
+        return False
+    dbm.add_artifact(con, vid, "srt_original", str(dest))
+    _set(con, vid, st.TRANSCRIPT_READY)
+    stats.transcripts_collected += 1
+    log.event("transcript_faster_whisper", video_id=vid, detail=dest.name)
     return True
 
 

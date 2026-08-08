@@ -4284,6 +4284,8 @@ def settings():
             cfg.data["discovery"]["min_duration_sec"] = _int("min_dur", 90, 0, 3600)
             cfg.data["transcription"]["timeout_minutes"] = _int("timeout_min", 180, 10, 720)
             cfg.data["transcription"]["collect_wait_minutes"] = _int("collect_wait", 45, 0, 180)
+            if f.get("local_model") in ("tiny", "base", "small", "medium", "large-v3"):
+                cfg.data["transcription"]["local_model"] = f["local_model"]
             try:
                 cfg_mod.save(cfg)
                 msg = '<span class=ok>设置已保存</span>'
@@ -4389,16 +4391,20 @@ def settings():
 </table></div>
 
 <div class=card><h3>③ 转录 · 音频变文字</h3>
-<p class=dim>主路径把音频投进 MacWhisper 监视文件夹并守候出稿（本地、免费）；或直接走 OpenAI API——超 24MB 自动压缩，仍超限则切段、段间 15 秒重叠、按时间码无缝合并。MacWhisper 超时会自动切 API 兜底，不会卡死。</p>
+<p class=dim>主路径把音频投进 MacWhisper 监视文件夹并守候出稿（本地、免费，仅 macOS）；或直接走 OpenAI API——超 24MB 自动压缩，仍超限则切段、段间 15 秒重叠、按时间码无缝合并；或用 faster-whisper 在本机跑（本地、免费、跨平台，首次使用会自动下载模型文件）。MacWhisper 超时会自动切 API 兜底，不会卡死。</p>
 <table class=wrap>
 <tr><td>转录方式</td><td><select name=primary>
-<option value=macwhisper_watch_srt {dsel('macwhisper_watch_srt',tp)}>MacWhisper 监视文件夹（本地）</option>
+<option value=macwhisper_watch_srt {dsel('macwhisper_watch_srt',tp)}>MacWhisper 监视文件夹（本地，仅 macOS）</option>
 <option value=openai_audio {dsel('openai_audio',tp)}>OpenAI Whisper API（云端）</option>
+<option value=faster_whisper {dsel('faster_whisper',tp)}>faster-whisper（本地，跨平台）</option>
 <option value=whisper_cpp {dsel('whisper_cpp',tp)}>whisper.cpp（本地）</option></select></td></tr>
 <tr><td>MacWhisper 超时</td><td><input name=timeout_min size=4
  value={cfg.get('transcription.timeout_minutes',180)}> 分钟无出稿 → 自动转 API 兜底</td></tr>
 <tr><td>守候回收</td><td>投稿后 <input name=collect_wait size=4
  value={cfg.get('transcription.collect_wait_minutes',45)}> 分钟内每 20 秒检查一次，出稿立即进入下一环节</td></tr>
+<tr><td>faster-whisper 模型</td><td><select name=local_model>
+{"".join(f'<option value={m} {dsel(m, cfg.get("transcription.local_model","small"))}>{m}</option>' for m in ("tiny","base","small","medium","large-v3"))}
+</select> 越大越准也越慢，首次用某个档位会现下载模型文件</td></tr>
 </table></div>
 
 <div class=card><h3>④ 整理 · AI 成文与配图</h3>

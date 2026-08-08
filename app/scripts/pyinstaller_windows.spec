@@ -43,7 +43,15 @@ for pkg in ("yt_dlp", "certifi", "anthropic", "openai", "pydantic",
            "frozendict", "platformdirs", "curl_cffi", "websockets",
            # API 密钥读写：keyring 在 Windows 上走 Credential Manager 后端，
            # 跟 macOS 上走 Keychain 后端一样是运行时按 entry points 选的
-           "keyring"):
+           "keyring",
+           # faster_whisper_backend.py：Windows 没有 MacWhisper，这是给
+           # Windows 用户的本地转录选项，所以 Windows 构建默认打包进去
+           # （macOS 那份 pyinstaller.spec 先不加，MacWhisper 已经覆盖了
+           # 本地转录这一块）。ctranslate2/tokenizers 是 faster-whisper
+           # 运行时真正用到但 collect_all("faster_whisper") 未必扫得全的
+           # 底层依赖，显式列出来避免打包完一跑就 ModuleNotFoundError。
+           "faster_whisper", "ctranslate2", "tokenizers", "huggingface_hub",
+           "av"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

@@ -21,7 +21,8 @@ import yaml
 from . import APP_NAME, AUTHOR
 from .paths import CONFIG_FILE
 
-VALID_TRANSCRIBERS = ("macwhisper_watch_srt", "openai_audio", "whisper_cpp", "skip")
+VALID_TRANSCRIBERS = ("macwhisper_watch_srt", "openai_audio", "faster_whisper",
+                     "whisper_cpp", "skip")
 
 # MacWhisper 是 macOS 专属应用，没有 Windows 版；新建配置时按平台给一个
 # 能用的默认值，而不是让 Windows 用户新装完就对着一个永远不会被满足的
@@ -88,6 +89,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "api_model": "whisper-1",
         "chunk_overlap_sec": 15,
         "max_upload_mb": 24,
+        # faster_whisper adapter（本地识别，见 faster_whisper_backend.py）：
+        # 免费、离线，但要吃本机 CPU/内存，不像 openai_audio 那样按分钟计费。
+        "local_model": "small",       # tiny|base|small|medium|large-v3
+        "local_device": "cpu",        # cpu|cuda（有 Nvidia GPU 才用得上 cuda）
+        "local_compute_type": "int8",  # int8|int8_float16|float16|float32
     },
     "article": {
         "enabled": True,

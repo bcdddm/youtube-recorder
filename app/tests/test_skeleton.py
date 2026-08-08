@@ -39,8 +39,16 @@ def test_state_machine():
     st.guard_transition(st.CAPTION_CHECK, st.AUDIO_QUEUED)
     st.guard_transition(st.FAILED, st.AWAITING_TRANSCRIPTION)  # retry path
     st.guard_transition(st.IGNORED, st.DISCOVERED)  # 用户"取消跳过"重新处理
+    # AUDIO_QUEUED -> TRANSCRIPT_READY：primary=openai_audio/faster_whisper
+    # 这两条同步直接调用的转录路径（没有 watchfolder 那种"投稿等回收"的
+    # 中间态），处理完就该直接进 TRANSCRIPT_READY。这条边原本没放行——
+    # 写 faster_whisper 集成时才发现 pipeline.py 里
+    # _openai_transcribe/_local_whisper_transcribe 两个调用方都会被这里
+    # 拒绝，而且拒绝之后被 _set() 自己的 try/except 悄悄吞掉，两条路径都
+    # 静默卡死在 audio_queued，从来没测试覆盖过。见 state.py 里的详细说明。
+    st.guard_transition(st.AUDIO_QUEUED, st.TRANSCRIPT_READY)
     for bad in [(st.DISCOVERED, st.WRITTEN), (st.VERIFIED, st.DISCOVERED),
-                (st.IGNORED, st.VERIFIED), (st.AUDIO_QUEUED, st.TRANSCRIPT_READY)]:
+                (st.IGNORED, st.VERIFIED), (st.AUDIO_QUEUED, st.ARTICLE_READY)]:
         try:
             st.guard_transition(*bad)
             raise AssertionError(f"illegal transition allowed: {bad}")
